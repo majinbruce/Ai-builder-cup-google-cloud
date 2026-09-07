@@ -173,6 +173,43 @@ const envSchema = z.object({
   // does not sign everybody out.
   APP_NAME: z.string().min(1).max(60).default("Acme"),
 
+  /* ---- Gemini / Google Cloud -------------------------------------------- */
+
+  /**
+   * AI Studio key for the localization pipeline. Optional here on purpose: a
+   * fresh clone, the unit suite and every non-pipeline route boot with no
+   * Google setup at all — the same "configure it or it does not exist" shape as
+   * the Google provider and Sentry above. Production requires it (refine
+   * below), and lib/gemini.ts throws a named error rather than a cryptic 401 if
+   * a stage is somehow reached without one.
+   */
+  GEMINI_API_KEY: z.string().min(1).optional(),
+
+  // Verified model name and date live in docs/research.md. Overridable so a
+  // mid-hackathon rename is an env change rather than a deploy, but
+  // src/lib/gemini.ts is the only thing that reads it.
+  GEMINI_MODEL: z.string().min(1).default("gemini-3.8-flash"),
+
+  // Uploads and synthesized audio. Unset means files stay under ./outputs,
+  // which is how the CLI stage scripts run against a fixture with no GCP
+  // project at all. Required in production, where there is no local disk worth
+  // writing to.
+  GCS_BUCKET: z.string().min(1).optional(),
+
+  // Cloud TTS voice. Chirp 3 HD is GA for hi-IN; hi-IN-Neural2-* is the
+  // full-SSML fallback if the Phase 3 spike shows prosody markup is ignored.
+  TTS_VOICE: z.string().min(1).default("hi-IN-Chirp3-HD-Kore"),
+
+  MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(26_214_400),
+
+  /**
+   * Capped at 180 rather than merely defaulted to it. Gemini bills 32 audio
+   * tokens per second and the whole demo has to finish inside two minutes, so a
+   * longer clip is not a slower run — it is a run that misses the point of the
+   * product. An operator raising this is changing the pitch, not a knob.
+   */
+  MAX_CLIP_SECONDS: z.coerce.number().int().positive().max(180).default(180),
+
   PG_HOST: z.string().min(1),
   PG_PORT: z.coerce.number().int().positive().default(5432),
   PG_USER: z.string().min(1),
@@ -345,6 +382,19 @@ const envSchemaWithRules = envSchema
         "callbackURLs redirected to them would carry auth results over plaintext",
     }
   )
+  .refine((env) => env.NODE_ENV !== "production" || Boolean(env.GEMINI_API_KEY), {
+    path: ["GEMINI_API_KEY"],
+    message:
+      "GEMINI_API_KEY is required in production: every pipeline stage calls " +
+      "Gemini, so a deploy without it accepts uploads and then fails every job.",
+  })
+  .refine((env) => env.NODE_ENV !== "production" || Boolean(env.GCS_BUCKET), {
+    path: ["GCS_BUCKET"],
+    message:
+      "GCS_BUCKET is required in production: Cloud Run has no persistent disk, " +
+      "so the ./outputs fallback silently loses every uploaded and synthesized " +
+      "file when the instance is recycled.",
+  })
   .refine(
     /**
      * A production deploy is behind a proxy essentially always, and if
@@ -474,6 +524,27 @@ export const config = {
     tracesSampleRate: env.SENTRY_TRACES_SAMPLE_RATE,
     environment: env.SENTRY_ENVIRONMENT ?? env.NODE_ENV,
     ...(env.APP_VERSION === undefined ? {} : { release: env.APP_VERSION }),
+  },
+
+  gemini: {
+    // null rather than undefined: "no key configured" is a state lib/gemini.ts
+    // branches on, and null makes that check explicit at the call site.
+    apiKey: env.GEMINI_API_KEY ?? null,
+    model: env.GEMINI_MODEL,
+  },
+
+  gcs: {
+    // null means "write to ./outputs" — the CLI mode the stage scripts use.
+    bucket: env.GCS_BUCKET ?? null,
+  },
+
+  tts: {
+    voice: env.TTS_VOICE,
+  },
+
+  limits: {
+    maxUploadBytes: env.MAX_UPLOAD_BYTES,
+    maxClipSeconds: env.MAX_CLIP_SECONDS,
   },
 
   db: {

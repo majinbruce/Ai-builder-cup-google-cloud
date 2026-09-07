@@ -17,3 +17,9 @@ dist/
 # Pipeline outputs and Google credentials
 outputs/
 *-service-account*.json
+
+# The demo clip is third-party content pending a rights decision — see
+# fixtures/README.md. Committing it would put it in the history of a repo that
+# becomes public, which is not undoable. Remove this line once the fixture is
+# team-recorded or openly licensed.
+fixtures/sample_60s.mp3

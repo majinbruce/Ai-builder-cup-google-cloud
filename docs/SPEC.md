@@ -126,11 +126,40 @@ export const Analysis = z.object({
 
 ### Stage 2 — Adapt (Gemini, text in, JSON out)
 
-Input: `Analysis` + target language (`hi`) + `adapt.v1.md`. The prompt makes the
-model translate *intent*, keep `keyTerms` in English where Hindi technical
-speech does (Hinglish is the norm in Indian tech education and the prompt says
-so), reproduce every `emphasis` term with a marker, and explain each non-literal
-decision. Every segment must come back; ids must match.
+Modelled on how a human localizer actually works, because a stateless
+per-segment call is exactly the machine that produces flat, stiff output. A
+human listens to the whole thing first, forms a picture of the topic and the
+teacher, writes themselves a glossary so a term is the same word every time,
+then *re-teaches* each point in Hindi rather than transcoding the sentence, and
+finally reads it aloud to catch what sounds wrong. Three moves, not one:
+
+**2a — the brief.** One small call over the whole `Analysis` (no segments
+adapted yet) producing `AdaptationBrief`: topic, audience, the instructor's
+persona, register guidance, and the **glossary**. The glossary lives at the
+adaptation level, not per segment, because its entire job is consistency —
+`closure` must not be one word in segment 3 and another in segment 11.
+
+**2b — adapt.** Input: `Analysis` + `AdaptationBrief` + target language (`hi`) +
+`adapt.v1.md`, walked in order with the previously adapted segment in context so
+callbacks ("remember that word — idempotent") and terminology carry across rows.
+The prompt makes the model translate *intent*, reproduce every `emphasis` term
+with a marker, and explain each non-literal decision. Every segment must come
+back; ids must match.
+
+**Hinglish, in Devanagari.** Code-mixing is the real register of Indian tech
+education and the prompt says so: technical vocabulary stays as the English
+*concept*, Hindi carries the grammar and the teaching. But `targetText` is
+**Devanagari only**, including transliterated terms (`क्लोज़र`), because that
+string is what goes to Chirp 3 HD and embedded Latin script is an unverified
+pronunciation risk on `hi-IN`. The English form travels separately in the
+glossary, so the reasoning panel still shows the learner "closure" on screen.
+
+**Register matches the speaker; fluency is non-negotiable.** A dry lecture stays
+dry — that is what intent-preserving means, and inventing enthusiasm the speaker
+never had would be editorializing, not localizing. What is not negotiable is
+that the Hindi sound like a person actually speaking it. That is a fluency
+requirement, enforced by the `naturalness` score in stage 3 rather than by
+asking the prompt to "be engaging".
 
 ```ts
 export const AdaptationChoice = z.object({
@@ -139,10 +168,24 @@ export const AdaptationChoice = z.object({
   adapted: z.string(),
   why: z.string(),                        // one or two sentences, learner-facing
 });
+export const GlossaryEntry = z.object({
+  english: z.string(),                    // "closure"
+  decision: z.enum(["transliterate", "translate", "keep_english_concept"]),
+  targetForm: z.string(),                 // Devanagari, e.g. "क्लोज़र"
+  why: z.string(),
+});
+export const AdaptationBrief = z.object({
+  topic: z.string(),
+  audience: z.string(),
+  instructorPersona: z.string(),          // how this teacher sounds, in one or two sentences
+  registerGuidance: z.string(),           // how to match THEM, not how to be lively
+  glossary: z.array(GlossaryEntry),
+});
 export const AdaptedSegment = z.object({
   id: z.string(),
-  targetText: z.string(),                 // Hindi (Devanagari), Hinglish terms allowed
+  targetText: z.string(),                 // Hindi, DEVANAGARI ONLY — this string goes to TTS
   literalText: z.string(),                // what a literal translation would say
+  termsUsed: z.array(z.string()),         // glossary `english` keys appearing here, for the UI
   rationale: z.string(),                  // overall: how signal + register were kept
   emphasisTerms: z.array(z.string()),     // target-language tokens to stress in TTS
   choices: z.array(AdaptationChoice),
@@ -154,6 +197,7 @@ export const AdaptedSegment = z.object({
 });
 export const Adaptation = z.object({
   targetLanguage: z.string(),             // "hi"
+  brief: AdaptationBrief,
   segments: z.array(AdaptedSegment).min(1),
 });
 ```
@@ -162,16 +206,36 @@ export const Adaptation = z.object({
 
 Input: original `AnalyzedSegment.text` + `AdaptedSegment.targetText` pairs plus
 the signal labels, with `critique.v1.md`. The model back-translates each Hindi
-segment *without seeing the English rationale*, then scores instructional
-fidelity. Segments with `fidelity < 70` or `signalPreserved === false` are sent
-back to Adapt **once** with the critique attached; the second result is kept
-regardless (bounded loop, no runaway cost).
+segment *without seeing the English rationale or the brief*, then scores it on
+two separate axes: **instructional fidelity** (does it still teach the same
+thing?) and **naturalness** (would an Indian instructor say this out loud?),
+quoting the specific stiff constructions it finds in `translationese[]`. The
+second axis is the read-aloud pass a human translator does, and it is what stops
+faithful-but-lifeless output from scoring well.
+
+Segments with `fidelity < 70`, `naturalness < 70`, or `signalPreserved === false`
+are sent back to Adapt **once** with the critique attached; the second result is
+kept regardless (bounded loop, no runaway cost).
+
+**On what this is and is not.** This is the same model family scoring output it
+produced, so it is a *blind back-translation check*, not an independent review,
+and the project says so rather than overclaiming. What blinding buys is real —
+the critic cannot see the reasoning it is meant to be checking, so it cannot
+launder a bad choice by reading its justification — but it is not independence.
+The rubric is published and the raw scores are shown in the UI including the
+failures, which is the honest form of the evidence.
 
 ```ts
 export const SegmentCritique = z.object({
   id: z.string(),
   backTranslation: z.string(),
   fidelity: z.number().int().min(0).max(100),
+  // Scored separately and on a different question: fidelity asks "does it still
+  // teach the same thing", naturalness asks "would an Indian instructor say this
+  // sentence out loud". A segment can be perfectly faithful and still be
+  // unusable translationese, and only the second score catches that.
+  naturalness: z.number().int().min(0).max(100),
+  translationese: z.array(z.string()),    // specific stiff constructions, quoted
   signalPreserved: z.boolean(),
   emphasisPreserved: z.boolean(),
   issues: z.array(z.string()),
@@ -179,6 +243,7 @@ export const SegmentCritique = z.object({
 });
 export const Critique = z.object({
   overallFidelity: z.number().int().min(0).max(100),
+  overallNaturalness: z.number().int().min(0).max(100),
   segments: z.array(SegmentCritique).min(1),
 });
 ```
@@ -314,15 +379,19 @@ The whole panel is data already in `Job`; no extra calls.
 |---|---|---|
 | Technical merit & Gen AI implementation | 40% | Native audio understanding (not transcript-only) driving a three-stage structured chain (analyze → adapt → critique) with schema-enforced JSON; a bounded self-correction loop fed by the critique; prosody hints from stage 1 shaping Chirp 3 HD synthesis; token and latency telemetry per call; Zod as the single contract for model output, DB and API. Gen AI is the product, not a feature. |
 | Problem alignment & impact | 25% | The signal taxonomy and fidelity score are direct measures of "does it still teach": a definition stays a definition, a warning still sounds like one, key terms survive as vocabulary. Hindi first targets the largest JAPAC learner population for English technical content. |
-| Innovation & creativity | 25% | Pedagogical signal detection as a first-class artifact; literal-vs-adapted with rationale per choice; independent back-translation critique visible to the user. Localization tools show output; this one shows judgment. |
+| Innovation & creativity | 25% | Pedagogical signal detection as a first-class artifact, with the model's prosody claims corroborated against measured ffmpeg energy and pause data rather than merely asserted; literal-vs-adapted with rationale per choice; a blind back-translation critique scoring fidelity *and* naturalness, shown to the user including the failures. Localization tools show output; this one shows judgment, and shows its working. |
 | User experience & solution design | 10% | Upload → progress → side-by-side with synced audio and one-click reasoning panel. Pre-computed demo job for instant first impression. Designer owns visual polish and the deck. |
 
 ---
 
-## f. Phased build plan (~46 h core, 40–60 h available)
+## f. Phased build plan (~52 h core, 40–60 h available)
 
 Each phase ends with something runnable. MUST phases are the demo; SHOULD items
 are done only after every MUST is green; NICE items are cut first.
+
+Revised 2026-09-07 from ~46 h to ~52 h: acoustic evidence became core to Phase 1
+(+3 h) and the brief/glossary/naturalness work became core to Phase 2 (+3 h).
+The margin comes out of the SHOULD list, which is cut before any MUST slips.
 
 ### Phase 0 — Scaffold, env, one Gemini call (MUST, ~4 h)
 - GCP project + billing (trial credits), AI Studio key, enable Cloud TTS API,
@@ -335,14 +404,24 @@ are done only after every MUST is green; NICE items are cut first.
 - Drop `fixtures/sample_60s.mp3`; confirm ffmpeg on PATH and in the Dockerfile.
 - Demoable: one structured Gemini response from real audio, in the terminal.
 
-### Phase 1 — Analyze stage (MUST, ~8 h)
+### Phase 1 — Analyze stage (MUST, ~11 h)
 - `src/prompts/analyze.v1.md`, `Analysis` schema, `stage-analyze.ts`.
+- **Acoustic evidence (core, not a fallback).** `src/lib/ffmpeg.ts` runs
+  `silencedetect` (pause boundaries) and `astats` (per-window RMS energy) on
+  every clip, and the analyze prompt receives that as text alongside the audio.
+  This is what turns "the model says it heard stress on *idempotent*" into "the
+  model's claim sits on top of a measured 400 ms pause and a 6 dB energy rise",
+  which is the version that survives a judge pushing on the central claim.
+  Measured pause boundaries also anchor segment `startSec`/`endSec`, which
+  otherwise depend entirely on the model's own timestamping.
 - Iterate the prompt on the fixture until segment boundaries and signal labels
   look right to a human. Save the good output as `fixtures/analysis.expected.json`.
 - Demoable: `npm run stage:analyze` prints timestamped, labeled segments.
 
-### Phase 2 — Adapt + critique with rationale (MUST, ~8 h)
-- `adapt.v1.md`, `critique.v1.md`, schemas, both scripts, the one-shot retry.
+### Phase 2 — Adapt + critique with rationale (MUST, ~11 h)
+- `brief.v1.md`, `adapt.v1.md`, `critique.v1.md`, schemas, the scripts, the
+  one-shot retry. Stage 2a (brief + glossary) and sequential segment context are
+  part of this phase, not extras — see section b.
 - Demoable: `npm run pipeline -- --no-audio` prints Hindi + rationale + scores.
 
 ### Phase 3 — Synthesis with prosody (MUST, ~6 h)
@@ -387,9 +466,12 @@ are done only after every MUST is green; NICE items are cut first.
 
 | Risk | Signal | Fallback |
 |---|---|---|
-| Gemini audio emphasis/prosody detection is weak or inconsistent | Stage 1 `emphasis` arrays empty or random on the fixture | Run `gemini-3.5-transcribe` for word-level timestamps, compute per-word RMS energy and local pauses with ffmpeg `astats`/`silencedetect`, feed both to the analyze prompt as text hints alongside the audio. Documented in `research.md`; ~4 h. |
+| Gemini audio emphasis/prosody detection is weak or inconsistent | Stage 1 `emphasis` arrays empty or random on the fixture | **Already mitigated by design** — ffmpeg `astats`/`silencedetect` evidence is fed to the analyze prompt on every run from Phase 1 (moved out of this table into the build plan on 2026-09-07), so a weak model reading is corroborated or contradicted by measurement rather than trusted. If the arrays are still poor, escalate to `gemini-3.5-transcribe` for word-level timestamps and align the energy windows per word; ~4 h. |
+| Hindi output is faithful but reads as stiff translationese | Low `naturalness` scores; the Hindi sounds like translated English rather than teaching | The brief + glossary + sequential context in stage 2a/2b exist for this, and stage 3 scores naturalness separately from fidelity so it cannot hide behind a good fidelity number. Failing segments go through the same one-shot retry. |
+| Hindi runs 15–25% longer than the English, so `output.mp3` drifts out of sync with `source.mp3` in the side-by-side view | Output duration materially exceeds source on the fixture | Open — decide in Phase 2: accept and state it, fit `speakingRate` per segment to the source span, or give Adapt a per-segment length budget. Listed here so it is not discovered during Phase 4. |
 | Chirp 3 HD ignores SSML `<prosody>`/`<emphasis>` (docs conflict) | Phase 3 spike shows no audible change | Use `speaking_rate` + `[pause]` markup only (confirmed for hi-IN), or switch voice to `hi-IN-Neural2-*` which supports full SSML. |
-| Free-tier rate limit (≈10 RPM) hit when a judge and the demo run together | 429 from Gemini | Enable billing before submission (Tier 1); exponential backoff; pre-computed demo job never calls Gemini. |
+| Free-tier rate limit hit when a judge and the demo run together | 429 from Gemini | **Measured 2026-09-07: the free tier is 5 RPM, not the ≈10 previously assumed, and one job is 4–5 calls — so a single run nearly exhausts the minute and two concurrent runs cannot both pass.** Enabling billing (Tier 1) is therefore a submission requirement, not a precaution. Plus exponential backoff, and a pre-computed demo job that never calls Gemini. |
+| Per-call latency eats the demo budget | Pipeline exceeds ~2 min on a 90 s clip | Measured: a *trivial* call costs ~16.5 s and 209 thought tokens at default thinking. Five sequential stages start at ~80 s before audio. Levers, in order: `thinking_level: "low"` on the mechanical stages (critique, adapt retry), batch segments per call rather than per segment, and run adapt and critique on the whole transcript in one call each. Decide with real numbers at the end of Phase 2. |
 | Cloud Run request timeout / scale-to-zero kills a running job | Job stuck in `analyzing` | Async runner + polling already in design; `min-instances=1`; job marked `failed` on process start if older than 10 min. |
 | Structured output rejects a "deeply nested" schema | 400 on `response_format` | Schemas are two levels deep by design; split Adapt into two calls if needed. |
 | No native Hindi judge on the team | — | Critique back-translation and fidelity are shown in the UI as the quality evidence; ask a Hindi-speaking colleague to review the fixture output once before recording. |
