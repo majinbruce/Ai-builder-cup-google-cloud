@@ -1,0 +1,11 @@
+-- Runs once, the first time the postgres volume is initialised.
+--
+-- The integration tests need a real Postgres (partial indexes, ON DELETE
+-- CASCADE, the 23505 -> 409 mapping and Better Auth's own SQL are not things a
+-- fake can tell you the truth about), but they must not run against the
+-- database you are developing against. A second database on the same server is
+-- the cheapest isolation that is still real: no extra container, no Docker
+-- socket in CI, nothing to start beyond `docker compose up`.
+--
+-- .env.test points PG_DATABASE here.
+CREATE DATABASE app_test;

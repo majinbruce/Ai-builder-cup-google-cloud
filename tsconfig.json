@@ -1,0 +1,47 @@
+{
+  "compilerOptions": {
+    /* Node 22.18+/24 runs .ts files directly by stripping types, so `node
+       src/server.ts` is the dev loop — no tsx, no ts-node, no watcher shim.
+       Type stripping only erases annotations, so enums, namespaces and
+       constructor parameter properties are off-limits. None of them are worth
+       using anyway. */
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    /* Lets imports be written as "./config/index.ts" — the path that actually
+       exists on disk and that Node needs at runtime. tsc rewrites them to
+       ".js" in the build output. Without this pair, ESM+NodeNext forces you to
+       write ".js" in a file that is really ".ts", which confuses everyone. */
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+
+    /* Every strictness flag on. The point of moving to TypeScript is the
+       compiler catching things; a loose config gives up most of that. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+    "noPropertyAccessFromIndexSignature": true,
+
+    /* Imports are erased exactly as written, so what the compiler sees and
+       what Node runs cannot drift. Requires `import type` for type-only
+       imports, which also documents intent. */
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    // The root config is for editors, ESLint and `npm run typecheck`.
+    // Emitting is tsconfig.build.json's job, which is why rootDir/outDir live there.
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "drizzle.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,256 @@
+# Production stack for a single VPS.
+#
+#   docker compose --env-file .env.production -f compose.prod.yml up -d --build
+#
+# `--env-file` is not optional and not decoration. It does two separate jobs:
+# it fills the ${...} interpolations below (Compose only ever reads that from
+# the shell or from --env-file, never from a service's `env_file:`), and it is
+# the same file the api and migrate services load into their containers. One
+# file, so the Postgres superuser Compose creates and the credentials the app
+# connects with cannot drift apart.
+#
+# .env.production is gitignored. Create it on the server from .env.example and
+# work through the "Deploying" section of the README — four settings are
+# boot-enforced in production and the app will refuse to start without them.
+#
+# This is a SEPARATE file from docker-compose.yml rather than an override of it.
+# An override can add to the dev file but cannot remove from it, and the two
+# things that make the dev stack wrong here — the bind mount of your source over
+# /app, and the published Postgres port — are exactly what an override cannot
+# take away.
+
+# Every clone of this boilerplate MUST set a distinct PROJECT_SLUG in its
+# .env.production. It is not cosmetic: Compose namespaces containers, volumes
+# and networks by project name, so two clones that share this name are treated
+# as the SAME stack — `up -d` on the second one adopts and restarts the first
+# one's containers, and its `pgdata` volume is the first one's database. The
+# `:?` makes that a startup error instead of a very confusing outage.
+name: ${PROJECT_SLUG:?PROJECT_SLUG is required in .env.production}
+
+# Every container gets the same log rotation. Without this, Docker's json-file
+# driver grows without limit and the first thing you learn about it is a full
+# disk at 3am on a box with no other symptoms.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    logging: *logging
+
+    # `:?` rather than a default. A default here would mean a production
+    # database quietly coming up as postgres/postgres because a line was missing
+    # from .env.production, which is the kind of thing nobody notices until it
+    # is indexed by a scanner.
+    environment:
+      POSTGRES_USER: ${PG_USER:?PG_USER is required in .env.production}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD is required in .env.production}
+      POSTGRES_DB: ${PG_DATABASE:?PG_DATABASE is required in .env.production}
+
+    # How deploy/host/backup/pg-backup.sh finds this database. The script enumerates
+    # running containers by label rather than reading a list it has to be told
+    # about, so a new project on this box is backed up from its first `up -d`
+    # with no edit to the backup host — which is the failure this design exists
+    # to prevent: the backup that was never configured for the newest project.
+    labels:
+      backup.enable: "true"
+      backup.project: ${PROJECT_SLUG}
+
+    # No `ports:` on purpose. The api reaches Postgres over the Compose network
+    # by hostname; publishing 5432 would put the database on the public
+    # internet. See the note on the api's ports below for why a firewall is not
+    # the backstop you would expect it to be.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Same one-shot design as development, and it matters more here: it runs to
+  # completion BEFORE the api starts serving, it fails the deploy loudly instead
+  # of half-migrating under live traffic, and it does not race itself if you
+  # ever run two api containers.
+  migrate:
+    build:
+      context: .
+      target: runtime
+    # Tagged per project. A shared tag means rebuilding project B silently
+    # replaces the image project A is pinned to, and A gets B's code on its
+    # next restart.
+    image: ${PROJECT_SLUG}-api:prod
+    restart: "no"
+    logging: *logging
+
+    env_file:
+      - path: .env.production
+        required: true
+
+    environment:
+      NODE_ENV: production
+      # Inside the Compose network the database is a hostname, not localhost.
+      # `environment` beats `env_file`, so this is the one thing .env.production
+      # cannot get wrong.
+      PG_HOST: postgres
+      PG_PORT: 5432
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    # drizzle-kit is a devDependency and is not in this image; the migrator
+    # ships inside drizzle-orm. See the comment at the top of the script.
+    command: ["node", "dist/scripts/migrate.js"]
+
+  api:
+    build:
+      context: .
+      target: runtime
+    image: ${PROJECT_SLUG}-api:prod
+    restart: unless-stopped
+    logging: *logging
+
+    env_file:
+      - path: .env.production
+        required: true
+
+    environment:
+      # Pinned here even though the Dockerfile already sets it: env_file beats a
+      # Dockerfile ENV, so a stray NODE_ENV line in .env.production would
+      # otherwise silently disable every production-only guard in config —
+      # secure cookies, the CORS and mailer refusals, JSON logging. `environment`
+      # beats env_file, so this settles it.
+      NODE_ENV: production
+      PG_HOST: postgres
+      PG_PORT: 5432
+      HOST: 0.0.0.0
+      # Fixed, and deliberately not ${PORT}. Three things agree on 3000 inside
+      # this container — the EXPOSE, the Dockerfile's HEALTHCHECK (which curls
+      # a hardcoded 127.0.0.1:3000) and the address Caddy proxies to. A PORT
+      # line in .env.production would move only the first, so the app would
+      # listen somewhere the healthcheck and the proxy are not.
+      PORT: 3000
+      # The commit this build came from, reported to Sentry as the release so a
+      # stack trace points at code. deploy/deploy.sh exports it from git before
+      # `up`; "unknown" is what an up run outside the script honestly is. (An
+      # APP_VERSION line in .env.production also fills it — interpolation reads
+      # the --env-file — but the exported value wins.)
+      APP_VERSION: ${APP_VERSION:-unknown}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+    # NO published port at all — not even on loopback.
+    #
+    # Caddy reaches this container over the shared `edge` network below, by the
+    # alias `${PROJECT_SLUG}-api`, so nothing about this stack is bound to a
+    # host port. That removes the whole class of problem that comes with
+    # publishing: no port to allocate per project, no clash when the third
+    # project also wants 3000, and nothing for a misconfigured firewall to
+    # expose. Docker writes its own iptables rules ahead of ufw's, so a port
+    # published on 0.0.0.0 by accident is reachable from the internet even
+    # though `ufw status` says otherwise — a port that was never published
+    # cannot be.
+    #
+    # To reach the app from the host for debugging, go through the container
+    # rather than reopening a port:
+    #
+    #   docker compose -f compose.prod.yml exec api \
+    #     node -e "fetch('http://127.0.0.1:3000/health/ready').then(r=>r.text()).then(console.log)"
+
+    # Must exceed SHUTDOWN_DRAIN_MS + SHUTDOWN_TIMEOUT_MS (5s + 10s by default).
+    # Docker sends SIGTERM, waits this long, then SIGKILLs — and the default is
+    # 10s, which lands in the middle of the readiness drain in server.ts and
+    # kills the process while it is still deliberately serving traffic. That
+    # would silently undo the graceful shutdown on every single deploy.
+    stop_grace_period: 30s
+
+    networks:
+      # Still on the project's own private network, which is how it reaches
+      # postgres. Naming `default` explicitly is required: the moment a service
+      # lists any network, it stops joining `default` implicitly.
+      default:
+      edge:
+        # Every project's api service is called `api`, so on a SHARED network
+        # they would all answer to the same DNS name and Caddy would round-robin
+        # between unrelated projects. The alias is what keeps them distinct.
+        aliases:
+          - ${PROJECT_SLUG}-api
+
+  # The Next.js frontend. Same shape as the api above and for the same reasons:
+  # no published port, reached by Caddy over the shared `edge` network under a
+  # per-project alias.
+  #
+  # It is a SEPARATE image from the api (`${PROJECT_SLUG}-web:prod`) built from
+  # web/Dockerfile. Nothing project-specific is baked into it — the app reads
+  # every setting at runtime on the server and has no NEXT_PUBLIC_* variables
+  # (see web/src/lib/env.ts) — so a rebuild is only needed for a code change.
+  web:
+    build:
+      context: ./web
+      target: runtime
+    image: ${PROJECT_SLUG}-web:prod
+    restart: unless-stopped
+    logging: *logging
+
+    env_file:
+      - path: web/.env.production
+        required: true
+
+    environment:
+      NODE_ENV: production
+      # Fixed for the same reason as the api's PORT: the EXPOSE, the
+      # Dockerfile HEALTHCHECK and the address Caddy proxies to all say 3001,
+      # and a PORT line in an env file would move only the app.
+      PORT: 3001
+      HOSTNAME: 0.0.0.0
+      # How SERVER components reach the API — over the private compose network,
+      # never through Caddy and never over the internet. The browser does NOT
+      # use this: it calls the relative path /api/..., which Caddy routes to the
+      # api container. Set here rather than in the env file because it is a fact
+      # about this compose network, not a project setting.
+      API_ORIGIN: http://api:3000
+
+    depends_on:
+      # Only that the api container has started. NOT `service_healthy`: the web
+      # container serves pages that do not need the API at all, and coupling its
+      # start to the API's readiness turns an API problem into a total outage.
+      api:
+        condition: service_started
+
+    stop_grace_period: 30s
+
+    networks:
+      default:
+      edge:
+        aliases:
+          - ${PROJECT_SLUG}-web
+
+volumes:
+  pgdata:
+
+networks:
+  # The project's own network. Postgres lives only here — it is not on `edge`,
+  # so Caddy (and every other project's api) cannot reach it at all.
+  default:
+
+  # The shared network Caddy also sits on. Created once on the box, outside any
+  # project, so no single project owns it:
+  #
+  #   docker network create edge
+  #
+  # `external: true` means Compose expects it to already exist and will refuse
+  # to start rather than quietly creating a project-scoped network of its own
+  # that Caddy is not on — which would look like a working deploy that 502s.
+  edge:
+    external: true

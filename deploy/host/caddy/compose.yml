@@ -1,0 +1,58 @@
+# The shared edge. ONE of these on the box, for all projects.
+#
+#   docker network create edge          # once, before anything
+#   cd /srv/edge && docker compose up -d
+#
+# It is a separate Compose project from every application stack on purpose:
+# rebuilding or destroying a project must not take TLS down for the others, and
+# `docker compose down` in a project directory should never be able to remove
+# the proxy.
+
+name: edge
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+
+    # The only two ports open to the internet on this whole box. Every
+    # application container is reachable exclusively over the `edge` network,
+    # so nothing else needs to be published — and 443/udp is HTTP/3, which
+    # Caddy serves by default and which is a plain latency win on mobile.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+      # caddy_data holds the ACME account key and every issued certificate, and
+      # losing it is the one genuinely expensive mistake here. Let's Encrypt
+      # rate-limits new certificates to 5 per identical name per week, so a
+      # proxy that re-issues from scratch on every restart will, after the
+      # fifth restart, simply stop being able to serve HTTPS for that domain
+      # for days. This volume is what makes a restart free.
+      - caddy_data:/data
+
+      - caddy_config:/config
+
+    networks:
+      - edge
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  edge:
+    # Created by hand (`docker network create edge`) rather than owned by this
+    # stack, so that `docker compose down` here does not try to delete a network
+    # that every application still has containers on.
+    external: true
+
+volumes:
+  caddy_data:
+  caddy_config:

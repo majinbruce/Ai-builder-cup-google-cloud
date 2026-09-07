@@ -1,0 +1,212 @@
+# One site block per project. Adding a project is: create the DNS record, copy
+# the block, `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile`.
+#
+# Certificates are issued and renewed automatically the first time a name is
+# requested over HTTPS. There is nothing to run and nothing to cron.
+{
+	# Where Let's Encrypt sends expiry warnings if renewal ever stops working.
+	# Set it to an address you actually read — it is the only channel that tells
+	# you about a certificate problem before users see it.
+	email you@example.com
+
+	# Uncomment to issue from the staging CA while you are getting DNS right.
+	# Staging certificates are untrusted by browsers, but they do not count
+	# against the production rate limit — which is worth remembering after the
+	# third failed attempt on a name that is only 5-per-week.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# --- shared snippet ---------------------------------------------------------
+# Everything that should be true of every project's API, defined once.
+(api_defaults) {
+	# Health probes are for the orchestrator, not the internet. The Docker
+	# HEALTHCHECK reaches the app inside the container and never crosses the
+	# proxy, so nothing external needs these — and /health/ready runs a database
+	# query per hit with rate limiting deliberately disabled, which makes it a
+	# free amplification target if left public. If an external monitor must poll
+	# it, replace this with a `remote_ip` matcher listing the monitor's addresses.
+	@health path /health/*
+	respond @health 404
+
+	encode zstd gzip
+
+	header {
+		# HSTS. Only meaningful once you are sure every hostname under this
+		# domain is HTTPS-only — it is hard to walk back, because browsers
+		# remember it for max-age regardless of what you serve later.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		# The API serves JSON, and a browser that sniffs a JSON response into
+		# something executable is the one interesting attack on it.
+		X-Content-Type-Options "nosniff"
+
+		# Not a secret, but there is no reason to advertise the proxy version.
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# --- shared snippet ---------------------------------------------------------
+# Everything that should be true of every project's frontend.
+(web_defaults) {
+	# No `encode` here, unlike api_defaults: Next.js already compresses its own
+	# responses, and compressing them twice only spends CPU.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		# Clickjacking. The API serves JSON and does not need this; an HTML app
+		# that renders a session does.
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+
+		# Baseline Content-Security-Policy. It is the defence-in-depth layer
+		# behind React's own escaping: if a script ever does get injected, this
+		# is what stops it phoning home or loading an attacker's payload.
+		#
+		#   default-src 'self'          nothing loads cross-origin unless allowed
+		#                               below — the browser only ever talks to
+		#                               this one origin anyway (see the design note).
+		#   script-src  adds 'unsafe-inline' because Next.js and next-themes both
+		#               emit inline bootstrap scripts and this app wires no nonce.
+		#               Tighten to a nonce/hash source if you add that plumbing.
+		#   style-src   'unsafe-inline' for the same reason — Tailwind/next-themes
+		#               inline styles and the theme class script.
+		#   img-src     https: and data: so the OAuth avatar (a Google URL) and
+		#               inlined SVG/data-URI icons render.
+		#   connect-src 'self' — every fetch is a relative path to this origin.
+		#   frame-ancestors 'self' — the CSP-native twin of X-Frame-Options.
+		#   base-uri / form-action 'self' — no off-origin <base> or form post.
+		#
+		# object-src 'none' kills the legacy plugin vector outright.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# --- projects ---------------------------------------------------------------
+# The upstream name is the network alias from the project's compose.prod.yml:
+# `${PROJECT_SLUG}-api` on port 3000 and `${PROJECT_SLUG}-web` on port 3001.
+# Both are Docker DNS names on the `edge` network, not host ports — there are
+# no host ports.
+#
+# ONE hostname serves both, split by path. That is the whole design and it is
+# worth understanding before changing it:
+#
+#   /api/*  -> the Fastify api container
+#   /*      -> the Next.js web container
+#
+# Because the browser only ever talks to one origin, the session cookie is
+# first-party (no SameSite/ITP problems, no COOKIE_DOMAIN to get right), there
+# is no CORS preflight on any request, and BETTER_AUTH_URL is simply this
+# hostname — which is also what Google's redirect_uri must be set to.
+#
+# `handle` blocks are mutually exclusive and evaluated in the order written, so
+# the first matching one wins and only one runs. That is why the paths are
+# expressed as handles rather than as matchers on individual directives —
+# Caddy reorders directives, but it does not reorder handles.
+
+proj1.example.com {
+	import web_defaults
+
+	# The web container's liveness probe, for Docker only — same reasoning as
+	# /health/* on the API. Must come before the catch-all: `handle` blocks are
+	# mutually exclusive and the FIRST match wins.
+	handle /healthz {
+		respond 404
+	}
+
+	handle /api/* {
+		import api_defaults
+		reverse_proxy proj1-api:3000
+	}
+
+	handle {
+		reverse_proxy proj1-web:3001
+	}
+}
+
+proj2.example.com {
+	import web_defaults
+
+	# The web container's liveness probe, for Docker only — same reasoning as
+	# /health/* on the API. Must come before the catch-all: `handle` blocks are
+	# mutually exclusive and the FIRST match wins.
+	handle /healthz {
+		respond 404
+	}
+
+	handle /api/* {
+		import api_defaults
+		reverse_proxy proj2-api:3000
+	}
+
+	handle {
+		reverse_proxy proj2-web:3001
+	}
+}
+
+# Optional: a bare API hostname, for a mobile client or a third party that has
+# no reason to go through the frontend's origin. The SAME container, reached by
+# a second name.
+#
+# Leave it out unless you need it. Adding it means BETTER_AUTH_URL still has to
+# stay the frontend origin (the browser flows depend on it), so this name serves
+# token-based clients — Authorization: Bearer, which the API's bearer() plugin
+# resolves to the same sessions row a cookie would.
+#
+# api.proj1.example.com {
+# 	import api_defaults
+# 	reverse_proxy proj1-api:3000
+# }
+
+# --- notes that will save you an afternoon ----------------------------------
+#
+# 1. TRUST_PROXY=1 in every project's .env.production.
+#
+#    Caddy sets X-Forwarded-For and terminates TLS, so without this the app
+#    sees the proxy's container IP as `request.ip` for every request on the
+#    box — meaning ONE rate-limit bucket shared by the entire internet, in
+#    front of sign-in and password reset. The app's config refuses to boot in
+#    production with TRUST_PROXY unset for exactly this reason; `1` is right
+#    here because there is exactly one proxy hop.
+#
+# 2. BETTER_AUTH_URL is the FRONTEND origin — https://proj1.example.com.
+#
+#    Not an api. hostname. Better Auth is served at /api/auth/* on this same
+#    origin (Caddy's `handle /api/*` above), and BETTER_AUTH_URL is what it
+#    builds absolute URLs from: the Google redirect_uri, the verification link,
+#    the reset link. Point it at a hostname the browser never visits and the
+#    OAuth callback lands somewhere with no session cookie.
+#
+#    Set the Google Cloud Console redirect URI to
+#    https://proj1.example.com/api/auth/callback/google — character for
+#    character, including the scheme and the absence of a trailing slash.
+#
+#    FRONTEND_URL and TRUSTED_ORIGINS are the same origin for the same reason.
+#
+# 2b. The frontend's own env is web/.env.production, NOT .env.production.
+#
+#    APP_URL=https://proj1.example.com and API_ORIGIN=http://api:3000 — the
+#    second is the compose network name, set in compose.prod.yml so the file
+#    cannot get it wrong. The browser never uses API_ORIGIN; it calls /api/...
+#    on this origin and Caddy routes it.
+#
+# 3. Active health checks are deliberately NOT enabled here.
+#
+#    Adding `health_uri /health/ready` to a reverse_proxy looks like an
+#    upgrade, and with more than one upstream it would be. With ONE upstream it
+#    inverts: /health/ready reports 503 when the database is unreachable, Caddy
+#    marks the only backend down, and every request 502s at the proxy —
+#    including the routes that need no database, and including the readiness
+#    probe your monitoring is reading. A brief database blip becomes a total
+#    outage plus a blind spot. Turn it on the day you run two api containers,
+#    not before.

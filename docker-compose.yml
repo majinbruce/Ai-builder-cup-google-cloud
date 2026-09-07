@@ -1,0 +1,135 @@
+# `docker compose up` is the whole setup. No file to copy, no secret to export:
+# the api and migrate services read .env.example (committed, dev defaults only)
+# and then layer .env.development over it if you have created one.
+#
+# For production you do NOT use this file — build the Dockerfile's `runtime`
+# stage and supply real env vars from your platform.
+
+name: fastify-ts-boilerplate
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
+      POSTGRES_DB: ${PG_DATABASE:-app_db}
+    ports:
+      # Override PG_PUBLISHED_PORT if you already have something on 5432.
+      # Only the host side moves — inside the compose network it is always 5432.
+      #
+      # Bound to loopback, not 0.0.0.0. These are default credentials, and
+      # Docker's iptables rules run ahead of ufw's — so on any internet-facing
+      # box an unqualified publish is an open database regardless of what
+      # `ufw status` says. Loopback keeps psql/GUI access from the host working
+      # and costs nothing locally.
+      - "127.0.0.1:${PG_PUBLISHED_PORT:-5432}:5432"
+    volumes:
+      # Named volume: the data survives `docker compose down`. Use
+      # `down -v` when you actually want a clean database.
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, on first initialisation of the volume above. Creates the
+      # separate app_test database the integration tests use.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # pg_isready, not a TCP probe: postgres accepts connections briefly
+      # during its own bootstrap and then restarts, so a port check goes green
+      # too early and the migrate service races it.
+      test:
+        ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DATABASE:-app_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Migrations run as a one-shot service, not from an application startup hook.
+  #
+  # It fails loudly and BEFORE the api container starts accepting traffic, it
+  # does not race when you scale api to more than one replica, and it keeps
+  # server.ts free of migration concerns. `service_completed_successfully`
+  # below is what makes api wait for it to exit 0.
+  migrate:
+    build:
+      context: .
+      target: dev
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env.development
+        required: false
+    environment:
+      # Inside the compose network the database is a hostname, not localhost.
+      # `environment` wins over `env_file`, so this is the one thing the env
+      # files cannot get wrong.
+      PG_HOST: postgres
+      PG_PORT: 5432
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+      # db/migrations is what the migrator reads — the generated .sql files plus
+      # the journal that says which of them have run.
+      - ./db:/app/db:ro
+    command: ["node", "src/scripts/migrate.ts"]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: dev
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env.development
+        required: false
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      HOST: 0.0.0.0
+      # Fixed, and deliberately not left to the env files. The container side of
+      # the mapping below and the Dockerfile's EXPOSE both say 3000, and a PORT
+      # line in .env.development would move only the app — so it would listen on
+      # a port nothing is published to and the stack would come up unreachable.
+      # Move the HOST side with API_PUBLISHED_PORT instead.
+      PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # Same rule as the database above: override API_PUBLISHED_PORT if you
+      # already have something on 3000. Only the host side moves — inside the
+      # container it is always 3000.
+      - "${API_PUBLISHED_PORT:-3000}:3000"
+    volumes:
+      # The source, live. `node --watch` reloads on save, so an edit on the
+      # host takes effect without a rebuild.
+      - .:/app
+      # An anonymous volume pinned over the bind mount, so the container keeps
+      # the node_modules that were installed for ITS platform instead of having
+      # the host's (possibly different arch, possibly absent) shadow them.
+      #
+      # It also OUTLIVES `up --build`: rebuilding the image does not touch a
+      # volume that already exists, so after adding a dependency the container
+      # keeps mounting the old node_modules over the new image's and the app
+      # dies on ERR_MODULE_NOT_FOUND for a package that is plainly in
+      # package.json. `docker compose up -d --build -V` renews it.
+      - /app/node_modules
+
+# There is deliberately NO `web` service here.
+#
+# The Next.js app in web/ is run on the host during development:
+#
+#     cd web && npm install && npm run dev      # http://localhost:3001
+#
+# That is not laziness about writing another service — it is the setup the app
+# is configured for. next.config.ts rewrites /api/* to http://127.0.0.1:3000
+# in development precisely so the browser stays same-origin while the two
+# processes sit on two ports, and Next's dev server watches the filesystem far
+# more happily outside a bind mount than inside one.
+#
+# Production is the opposite and does have a web service: see compose.prod.yml.
+
+volumes:
+  pgdata:

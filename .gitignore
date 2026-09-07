@@ -1,0 +1,15 @@
+node_modules/
+*.log
+
+# Real environment files — only .env.example is committed.
+.env
+.env.development
+.env.production
+
+# .env.test IS committed — it holds no secrets and the test suite needs it.
+
+coverage/
+.DS_Store
+.vscode/
+.idea/
+dist/

@@ -1,0 +1,24 @@
+# Host crontab for the shared VPS.  Install with `sudo crontab -e`.
+#
+# Times are UTC unless the host clock says otherwise (`timedatectl`). They are
+# deliberately staggered: the backup dumps every database, and the prune writes
+# to the same tables, so overlapping them would mean backing up a database
+# mid-DELETE for no benefit.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# --- backups: nightly at 03:30 UTC ------------------------------------------
+30 3 * * * /srv/edge/backup/pg-backup.sh >> /var/log/pg-backup.log 2>&1
+
+# --- expired session/token prune: weekly, Sunday 04:15 UTC ------------------
+# Once a week is plenty: these rows are already harmless, this only stops them
+# accumulating. One line per project — this is the only per-project entry you
+# have to add by hand, and forgetting it costs you nothing but table bloat.
+15 4 * * 0 cd /srv/proj1 && docker compose --env-file .env.production -f compose.prod.yml exec -T api node dist/scripts/prune-expired.js >> /var/log/pg-prune.log 2>&1
+15 4 * * 0 cd /srv/proj2 && docker compose --env-file .env.production -f compose.prod.yml exec -T api node dist/scripts/prune-expired.js >> /var/log/pg-prune.log 2>&1
+
+# --- log rotation for the two files above -----------------------------------
+# Docker's own logs are rotated by the json-file driver options in each compose
+# file; these two are plain files and are not.  See deploy/README.md for the
+# logrotate snippet.
