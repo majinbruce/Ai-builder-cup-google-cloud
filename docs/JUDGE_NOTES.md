@@ -112,3 +112,8 @@ shown above; the model half is written, typechecked, schema-bound and covered by
 therefore a prerequisite for finishing Phase 1, not a submission-week checklist
 item. This entry gets the actual numbers appended the moment a real run lands,
 and if the corroboration rate comes back poor, that number goes here too.
+(Correction, same day: billing was subsequently attached to the project, and
+the 429 changed to `Your prepayment credits are depleted` — reproduced twice.
+So the account is on prepaid billing at a zero balance rather than on the free
+tier, and the blocker is funding, not rate. The AI Studio prepay balance has to
+be topped up before any Gemini call in this repo succeeds.)

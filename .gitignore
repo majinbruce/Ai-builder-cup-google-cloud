@@ -7,7 +7,7 @@ node_modules/
 .env.production
 
 # .env.test IS committed — it holds no secrets and the test suite needs it.
-
+docs/
 coverage/
 .DS_Store
 .vscode/
