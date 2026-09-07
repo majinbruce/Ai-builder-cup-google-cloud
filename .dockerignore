@@ -6,4 +6,8 @@ test
 .git
 .env
 .env.*
+# Root-level docs only. Docker patterns do not cross "/", so this leaves
+# src/prompts/*.md in the build context — verified by build on 2026-09-07, and
+# load-bearing: the runtime stage COPYs src/prompts, and loadPrompt() throws at
+# the first model call if they are missing. Do NOT "tidy" this to **/*.md.
 *.md

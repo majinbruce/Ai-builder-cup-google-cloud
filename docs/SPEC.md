@@ -71,7 +71,11 @@ export const JobStatus = z.enum([
 ### Stage 0 — Ingest
 
 Input: multipart upload (`audio/*`, `video/mp4`, ≤ 25 MB, ≤ 180 s) or, NICE, a
-YouTube URL. ffmpeg normalizes to 16 kHz mono MP3 (Gemini downsamples to 16 kbps
+YouTube URL. The size cap is `@fastify/multipart`'s `limits.fileSize`, fed from
+`config.limits.maxUploadBytes` — **not** Fastify's `bodyLimit`, which measurement
+on 2026-09-07 showed does not apply to multipart at all (a 300 KB file passed a
+1 KB `bodyLimit` with a 200, because the plugin consumes the raw stream itself).
+Wiring the cap to `bodyLimit` would be a cap that silently does nothing. ffmpeg normalizes to 16 kHz mono MP3 (Gemini downsamples to 16 kbps
 mono anyway, so nothing is lost and inline base64 stays under the 20 MB request
 cap). Output stored in GCS at `jobs/<jobId>/source.mp3`.
 
@@ -278,10 +282,21 @@ export const Synthesis = z.object({
 
 ```ts
 export const ModelCall = z.object({
-  stage: z.enum(["analyze", "adapt", "critique", "adapt_retry", "synthesize"]),
+  // "smoke" is not a pipeline stage — it is the Phase 0 connectivity check. It
+  // shares this enum so the telemetry path the real stages use is the one
+  // exercised from the very first call this project makes.
+  stage: z.enum([
+    "smoke", "analyze", "adapt", "critique", "adapt_retry", "synthesize",
+  ]),
   model: z.string(),
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
+  // Measured 2026-09-07: `total_output_tokens` EXCLUDES thinking, which is
+  // reported as `total_thought_tokens` and billed as output. Recorded separately
+  // so a stage that is expensive because it thinks is distinguishable from one
+  // that is expensive because it writes — the distinction the latency risk in
+  // section g turns on, since thinking is the part `thinking_level` can buy back.
+  thoughtTokens: z.number().int().nonnegative(),
   latencyMs: z.number().int().nonnegative(),
 });
 export const Job = z.object({
@@ -400,7 +415,7 @@ The margin comes out of the SHOULD list, which is cut before any MUST slips.
   `MAX_CLIP_SECONDS` to `src/config/index.ts`.
 - `src/lib/gemini.ts`: client factory + `generateJson(schema, prompt, parts)`
   helper that sets `response_format`, parses, logs usage and latency.
-- `src/scripts/smoke-gemini.ts`: sends 5 s of the fixture, prints JSON.
+- `src/scripts/smoke-gemini.ts`: sends the whole fixture, prints JSON.
 - Drop `fixtures/sample_60s.mp3`; confirm ffmpeg on PATH and in the Dockerfile.
 - Demoable: one structured Gemini response from real audio, in the terminal.
 

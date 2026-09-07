@@ -45,14 +45,26 @@ export function loadPrompt(name: string): string {
     // A typo'd prompt name is otherwise a model call with an empty system
     // prompt, which does not throw — it just returns worse output for the rest
     // of the hackathon. Listing what IS there turns that into a one-line fix.
-    const available = fs
-      .readdirSync(PROMPT_DIR)
-      .filter((entry) => entry.endsWith(".md"))
-      .map((entry) => entry.replace(/\.md$/, ""))
-      .join(", ");
+    //
+    // Guarded separately because the directory itself may be the thing that is
+    // missing — the wrong-cwd case this module's header warns about. An
+    // unguarded readdirSync throws ENOENT from inside this catch and replaces
+    // the message below with a bare scandir error, losing both the prompt name
+    // and the path we looked in, which are the two things worth knowing.
+    let available: string;
+    try {
+      available =
+        fs
+          .readdirSync(PROMPT_DIR)
+          .filter((entry) => entry.endsWith(".md"))
+          .map((entry) => entry.replace(/\.md$/, ""))
+          .join(", ") || "(none)";
+    } catch {
+      available = `(no prompt directory at ${PROMPT_DIR} — is the cwd the project root?)`;
+    }
 
     throw new Error(
-      `Prompt "${name}" not found at ${file}. Available prompts: ${available || "(none)"}`
+      `Prompt "${name}" not found at ${file}. Available prompts: ${available}`
     );
   }
 

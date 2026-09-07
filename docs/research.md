@@ -47,8 +47,18 @@ const parsed = zodSchema.parse(JSON.parse(interaction.output_text));
   of type `Usage` (L16882): `total_input_tokens`, `total_output_tokens`,
   `total_thought_tokens`, `total_cached_tokens`, plus per-modality breakdowns
   (`input_tokens_by_modality`, …). Read by `src/lib/gemini.ts` into `ModelCall`.
+  **Measured 2026-09-07: `total_output_tokens` EXCLUDES thinking.** On the smoke
+  call, `1925 in + 151 out + 208 thought = 2284 total`. So output and thought are
+  disjoint and both are billed at the output rate — cost is
+  `(out + thought) × $3.75/1M`, and reading `total_output_tokens` alone
+  under-reports a thinking-heavy stage by more than half.
 - `z.toJSONSchema()` (Zod 4) emits a `$schema` meta key that Gemini's OpenAPI
   subset has no use for; `src/lib/gemini.ts` strips it before sending.
+- **`$ref`/`$defs` are not a problem.** Gemini's schema subset has no `$ref`, so
+  a Zod schema that extracted shared sub-objects into `$defs` would 400. Checked
+  2026-09-07 against the full `Analysis` shape from SPEC §b plus a deliberately
+  reused sub-object: Zod 4 **inlines** repeated schemas rather than emitting
+  `$defs`, so the SPEC schemas convert cleanly. Re-check if Zod is upgraded.
 
 ## Cloud Text-to-Speech
 

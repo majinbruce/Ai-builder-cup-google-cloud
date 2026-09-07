@@ -43,14 +43,23 @@ export const GEMINI_MODEL = config.gemini.model;
  */
 const MAX_INLINE_AUDIO_BYTES = 14 * 1024 * 1024;
 
+/**
+ * Exactly the audio MIME types Gemini documents, and nothing else.
+ *
+ * `.m4a` and `.webm` were here and are deliberately gone: neither audio/m4a nor
+ * audio/webm appears in the documented set, so accepting them advertised
+ * support this project had never verified. Nothing is lost — ingest normalizes
+ * every upload to 16 kHz mono mp3 before a model call, so this map only ever
+ * sees the CLI stage scripts pointed at a fixture. A contributor who needs one
+ * of those formats should convert it, and the error below says so.
+ */
 const AUDIO_MIME_TYPES: Record<string, string> = {
   ".mp3": "audio/mp3",
   ".wav": "audio/wav",
-  ".m4a": "audio/m4a",
+  ".aiff": "audio/aiff",
   ".aac": "audio/aac",
   ".ogg": "audio/ogg",
   ".flac": "audio/flac",
-  ".webm": "audio/webm",
 };
 
 let client: GoogleGenAI | null = null;
@@ -77,8 +86,7 @@ export function getGeminiClient(): GoogleGenAI {
 
 /** A single piece of model input: prompt text, or audio. */
 export type InputPart =
-  | { type: "text"; text: string }
-  | { type: "audio"; data: string; mime_type: string };
+  { type: "text"; text: string } | { type: "audio"; data: string; mime_type: string };
 
 /**
  * Reads an audio file into an inline base64 input part.
@@ -95,7 +103,8 @@ export function audioPart(filePath: string): InputPart {
   if (mimeType === undefined) {
     throw new Error(
       `Unsupported audio extension "${extension}" for ${filePath}. ` +
-        `Supported: ${Object.keys(AUDIO_MIME_TYPES).join(", ")}`
+        `Gemini accepts: ${Object.keys(AUDIO_MIME_TYPES).join(", ")}. ` +
+        "Convert first: ffmpeg -i <in> -ar 16000 -ac 1 out.mp3"
     );
   }
 
@@ -198,13 +207,37 @@ export async function generateJson<T extends z.ZodType>(
 
   const data = schema.parse(parsedJson);
 
+  /**
+   * Missing usage is an error, not a zero.
+   *
+   * `?? 0` here used to mean that a renamed usage field — exactly the kind of
+   * mid-hackathon SDK change this module exists to absorb — would degrade into
+   * a cost panel confidently rendering zeros. docs/SPEC.md section e sells that
+   * telemetry as evidence that the reasoning is worth what it costs, so silently
+   * reporting that it cost nothing is worse than failing. `total_thought_tokens`
+   * keeps its fallback: a call made with thinking off legitimately has none.
+   */
   const usage = interaction.usage;
+  if (
+    usage?.total_input_tokens === undefined ||
+    usage.total_output_tokens === undefined
+  ) {
+    throw new Error(
+      `Gemini reported no token usage for stage "${stage}". Expected ` +
+        "usage.total_input_tokens and usage.total_output_tokens (verified " +
+        `2026-09-07, docs/research.md); got: ${JSON.stringify(usage)}. The SDK ` +
+        "response shape changed — update docs/research.md rather than defaulting to 0."
+    );
+  }
+
   const call: ModelCall = {
     stage,
     model: GEMINI_MODEL,
-    inputTokens: usage?.total_input_tokens ?? 0,
-    outputTokens: usage?.total_output_tokens ?? 0,
-    thoughtTokens: usage?.total_thought_tokens ?? 0,
+    inputTokens: usage.total_input_tokens,
+    outputTokens: usage.total_output_tokens,
+    // Billed as output but reported separately, so a stage that is expensive
+    // because it thinks is distinguishable from one that writes a lot.
+    thoughtTokens: usage.total_thought_tokens ?? 0,
     latencyMs,
   };
 

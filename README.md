@@ -63,6 +63,29 @@ Anything you set in `.env.development` overrides the defaults; the file is
 gitignored. Google sign-in is optional and off until you add credentials — see
 [Google OAuth setup](#google-oauth-setup).
 
+### The Google Cloud side
+
+The pipeline needs a GCP project, billing, Cloud TTS, a GCS bucket and ADC.
+Rather than a checklist to follow by hand, run the wizard — it walks each
+console step, captures the values into `.env.development`, and finishes by
+actually calling Cloud TTS and writing to the bucket, so "configured" and
+"working" are the same claim:
+
+```bash
+bash deploy/gcp/setup.sh
+```
+
+It is safe to re-run and skips whatever already exists. Enabling billing is the
+one step that is not optional: measured 2026-09-07, the Gemini free tier is
+5 requests/minute and one job makes 4-5 calls, so an unbilled project cannot
+survive a judge running the demo twice.
+
+Then prove the model path end to end:
+
+```bash
+npm run smoke:gemini       # real audio in, schema-valid JSON out, cost printed
+```
+
 Already using port 5432 or 3000? `PG_PUBLISHED_PORT=5433 PORT=3001 docker compose up`.
 
 The frontend runs on the host, beside it:

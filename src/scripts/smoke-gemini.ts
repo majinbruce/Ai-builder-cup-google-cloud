@@ -99,10 +99,16 @@ if (!data.isSpeech) {
   );
 }
 
-if (call.inputTokens === 0 || call.outputTokens === 0) {
+// The "usage came back empty" check that used to live here is now inside
+// generateJson(), which throws rather than recording zeros — so every stage
+// gets it, not just this script. What is still worth asserting here is the
+// thing only an audio call can prove: that the clip was billed as audio.
+if (call.inputTokens <= call.outputTokens) {
   fail(
-    "\n  FAILED: token usage came back zero, so the telemetry path is wrong. " +
-      "Check the `usage` object in outputs/smoke-raw.json against docs/research.md."
+    "\n  FAILED: input tokens did not exceed output tokens, which a ~60 s audio " +
+      "clip must. The audio was probably dropped from the request and the model " +
+      "answered from the prompt alone. Check `input_tokens_by_modality` in " +
+      "outputs/smoke-raw.json for an `audio` entry."
   );
 }
 
