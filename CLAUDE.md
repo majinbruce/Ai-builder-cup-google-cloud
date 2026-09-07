@@ -1,3 +1,86 @@
+# Intent-Preserving Localization — AI Builder Cup by Google (JAPAC)
+
+## What this is
+A hackathon prototype. Educational English audio/video (MOOCs, tech explainers,
+corporate training) is localized to Hindi while preserving BOTH the emotional
+register AND the pedagogical signal — emphasis on key terms, the "this part
+matters" tonal shift, comprehension-calibrated pacing, and intent-preserving (not
+literal) adaptation of idioms and cultural references. Every adaptation must
+surface its own reasoning so the AI's judgment is auditable.
+
+Full spec: `docs/SPEC.md` — read it before any non-trivial task. Verified Google
+doc facts, model names and quotas: `docs/research.md` — cite it, not memory.
+
+Team: Omkar builds everything; a designer owns `web/` visual polish, the deck and
+the video. Theme: **Media, Content & Digital Experiences** (there is no Education
+theme). Deadline 4 Oct 2026.
+
+## Hard constraints (hackathon rules — never violate)
+- All generative work uses Google AI models (Gemini / Gemma). No OpenAI/Anthropic APIs
+  in the shipped prototype.
+- Deployed on Google Cloud: API and frontend both on Cloud Run; files on GCS.
+- All code, comments, docs, UI copy in English.
+- A WORKING prototype, not a mockup. Every feature we claim must run end-to-end.
+- Team of 2–4 registered; every line of project code written after 7 Sept 2026.
+
+## Judging weights — optimize in this order
+1. 40% Technical merit & Gen AI implementation — Gen AI must be load-bearing, not decorative.
+2. 25% Problem alignment & impact — tie every feature back to "does it teach as well as the original?"
+3. 25% Innovation — the differentiator is PEDAGOGICAL signal detection + auditable reasoning. Protect it.
+4. 10% UX — clean and accessible, but don't over-invest.
+
+## Stack additions on top of the boilerplate (verified 2026-09-07, see docs/research.md)
+- Gemini `gemini-3.8-flash` via `@google/genai` **Interactions API**
+  (`client.interactions.create`), AI Studio key. `generateContent` is legacy; do not
+  use it. Vertex AI only as a NICE.
+- Structured output: one Zod schema per stage → `z.toJSONSchema()` →
+  `response_format.schema`, and the same schema `.parse()`s the reply and serializes
+  the API response. Never hand-write JSON Schema.
+- Speech in: Gemini native audio understanding (inline base64 ≤ 20 MB, else Files
+  API). Speech out: **Cloud Text-to-Speech Chirp 3 HD `hi-IN`** (GA). Gemini TTS
+  models are all Preview → NICE only.
+- Storage: GCS bucket for uploads and outputs. Job state in Postgres via the
+  existing Drizzle setup — do not add Firestore. Prod Postgres: Cloud SQL on
+  credits → else the team's US VPS with `compose.prod.yml` → else Supabase.
+- No ADK: the pipeline is a fixed typed sequence; a linear service is simpler.
+- Better Auth stays; prod runs one seeded demo user with
+  `AUTH_REQUIRE_EMAIL_VERIFICATION=false`.
+- Jobs run async after the POST returns (Cloud Run request timeout is 300 s by
+  default); the UI polls `GET /api/v1/localize/jobs/:id`. `min-instances=1` on the API.
+
+## Core pipeline (the product) — lives in `src/modules/localize/`
+1. Ingest: audio/video upload (≤ 25 MB, ≤ 180 s) → ffmpeg → 16 kHz mono mp3 in GCS.
+2. Analyze (Gemini, audio in, JSON out): pedagogically segmented transcript with
+   signal label (the 7-label enum in SPEC §c), register, pace, emphasis markers,
+   idioms, key terms.
+3. Adapt (Gemini, JSON out): Hindi script preserving intent, `literalText` beside it,
+   `rationale` + one `why` per non-literal choice, TTS hints per segment.
+4. Critique (Gemini, separate call, blind to the rationale): back-translate, score
+   fidelity 0–100; segments < 70 are re-adapted ONCE with the critique attached.
+5. Synthesize: Cloud TTS per segment with `speaking_rate` + `[pause]` markup (+ SSML
+   prosody if the Phase 3 spike confirms Chirp 3 HD honors it), ffmpeg concat.
+6. Present (`web/`): side-by-side original vs adapted with the reasoning panel — the demo.
+
+## Project engineering rules (in addition to the boilerplate rules below)
+- Every Gemini call returns JSON validated by a Zod schema. No free-text parsing.
+- Prompts live in `src/prompts/<stage>.v1.md`, versioned, loaded at startup — never
+  inline strings.
+- Each pipeline stage is runnable in isolation from `src/scripts/stage-*.ts`
+  against `fixtures/sample_60s.mp3` (`npm run stage:analyze` etc.), so one stage
+  can be demoed or debugged alone.
+- Log token usage and latency per Gemini call via `request.log`. A 60–90 s clip must
+  complete in < 2 min for the demo.
+- Gemini/GCP settings go through `src/config/index.ts` like everything else
+  (rule 3 below). Model id and API surface are single constants in `src/lib/gemini.ts`.
+- Target language: Hindi only. A second language is a NICE after the pipeline is solid.
+- Don't add features not in `docs/SPEC.md` without asking. Scope creep kills hackathons.
+- If a Google API behaves differently from `docs/research.md`, say so immediately
+  and update that file; never work around it silently.
+- Before claiming anything works, run it and show the output.
+- When unsure about a product decision, use AskUserQuestion rather than guessing.
+
+---
+
 # Fastify + TypeScript + PostgreSQL boilerplate
 
 Cloned as the starting point for new projects. Keep these rules intact when

@@ -25,7 +25,7 @@ FROM node:24-alpine AS dev
 
 WORKDIR /app
 
-RUN apk add --no-cache dumb-init
+RUN apk add --no-cache dumb-init ffmpeg
 
 COPY package*.json ./
 RUN npm ci
@@ -52,12 +52,15 @@ WORKDIR /app
 
 # dumb-init reaps zombies and, more importantly, forwards SIGTERM to node so
 # the graceful shutdown in server.ts actually runs on `docker stop`.
-RUN apk add --no-cache dumb-init
+# ffmpeg normalizes uploads and concatenates synthesized segments.
+RUN apk add --no-cache dumb-init ffmpeg
 
 COPY --from=deps  /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY db ./db
+COPY src/prompts ./src/prompts
+COPY fixtures ./fixtures
 
 # Never run the app as root.
 RUN addgroup -S app && adduser -S app -G app && chown -R app:app /app

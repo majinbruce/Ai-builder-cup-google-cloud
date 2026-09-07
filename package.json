@@ -1,7 +1,7 @@
 {
-  "name": "fastify-ts-boilerplate",
+  "name": "intent-preserving-localization",
   "version": "1.0.0",
-  "description": "Layered Fastify + TypeScript + PostgreSQL boilerplate",
+  "description": "Localizes educational English audio to Hindi while preserving pedagogical signal, with auditable reasoning. AI Builder Cup 2026.",
   "type": "module",
   "main": "dist/server.js",
   "engines": {
@@ -28,16 +28,26 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"**/*.{ts,json,md}\"",
     "auth:schema": "npx auth@latest generate --config src/lib/auth.ts",
-    "auth:secret": "npx auth@latest secret"
+    "auth:secret": "npx auth@latest secret",
+    "smoke:gemini": "node src/scripts/smoke-gemini.ts",
+    "stage:analyze": "node src/scripts/stage-analyze.ts",
+    "stage:adapt": "node src/scripts/stage-adapt.ts",
+    "stage:critique": "node src/scripts/stage-critique.ts",
+    "stage:synthesize": "node src/scripts/stage-synthesize.ts",
+    "pipeline": "node src/scripts/pipeline.ts"
   },
   "dependencies": {
     "@fastify/compress": "^9.2.0",
     "@fastify/cors": "^11.3.0",
     "@fastify/helmet": "^13.1.0",
+    "@fastify/multipart": "^10.1.1",
     "@fastify/rate-limit": "^11.2.0",
     "@fastify/swagger": "^9.8.1",
     "@fastify/swagger-ui": "^6.1.1",
     "@fastify/under-pressure": "^9.1.0",
+    "@google-cloud/storage": "^8.0.1",
+    "@google-cloud/text-to-speech": "^7.0.0",
+    "@google/genai": "^2.21.0",
     "@sentry/node": "^10.72.0",
     "better-auth": "^1.7.1",
     "dotenv": "^17.4.2",

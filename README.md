@@ -1,3 +1,26 @@
+# Intent-Preserving Localization
+
+**AI Builder Cup 2026 (JAPAC) · Theme: Media, Content & Digital Experiences**
+
+Localizes educational English audio into Hindi while preserving the *pedagogical
+signal*: which terms the teacher stressed, where they slowed down for a definition,
+where the tone shifted to a warning, which idiom carried the idea. Every
+non-literal adaptation carries a rationale, and an independent back-translation
+critique scores instructional fidelity, so the AI's judgment is auditable.
+
+Pipeline: ingest → analyze (Gemini, audio in) → adapt → critique → synthesize
+(Cloud TTS Chirp 3 HD) → side-by-side review with a reasoning panel.
+
+- **Spec:** [`docs/SPEC.md`](docs/SPEC.md) — problem, schemas, taxonomy, phases, checklist
+- **Verified Google docs and quotas:** [`docs/research.md`](docs/research.md)
+- **Stack:** Fastify + TypeScript + Postgres API (this directory), Next.js UI in
+  [`web/`](web/README.md), Gemini via `@google/genai`, deployed on Cloud Run
+
+Status: planning complete, Phase 0 next. Built on the boilerplate documented below;
+all project code is written during the hackathon window (7 Sept – 3 Oct 2026).
+
+---
+
 # Fastify + TypeScript + PostgreSQL boilerplate
 
 Production-shaped API skeleton: Fastify 5, TypeScript on Node's native type

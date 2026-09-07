@@ -13,3 +13,7 @@ coverage/
 .vscode/
 .idea/
 dist/
+
+# Pipeline outputs and Google credentials
+outputs/
+*-service-account*.json
