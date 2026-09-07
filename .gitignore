@@ -23,3 +23,8 @@ outputs/
 # becomes public, which is not undoable. Remove this line once the fixture is
 # team-recorded or openly licensed.
 fixtures/sample_60s.mp3
+
+# The accepted stage-1 output for the fixture. Regenerated with
+# `npm run stage:analyze`; not committed, because it contains a verbatim
+# transcript of the same third-party clip as sample_60s.mp3 above.
+fixtures/analysis.expected.json

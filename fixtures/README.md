@@ -4,6 +4,14 @@
 to. Expected outputs from a known-good run are saved beside it
 (`analysis.expected.json`, …) so a prompt regression is visible as a diff.
 
+Those expected files are **regenerated, not committed** — `npm run stage:analyze`
+writes `outputs/analysis.json`, and copying an accepted run to
+`fixtures/analysis.expected.json` makes the next run diffable against it. They
+are gitignored for the same reason the mp3 is: they contain a verbatim
+transcript of the clip, and the rights question below is unresolved.
+`test/analyze.test.ts` skips its schema check when the file is absent, so a
+fresh clone still passes.
+
 Requirements for a good fixture: at least one definition, one stressed key term,
 one warning, one idiom or cultural reference, and a recap. See `docs/SPEC.md` §c.
 Real human speech, not TTS — synthesized audio has no genuine prosody, so

@@ -14,7 +14,7 @@ this file, the API changed: tell the user, then update this file.
 | Word timestamps fallback | `gemini-3.5-transcribe` (GA): speech-to-text with word-level timestamps, diarization, 85+ languages. | https://ai.google.dev/gemini-api/docs/models |
 | Gemini TTS | `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts` — **all Preview**. Hindi (`hi`) listed. Style via natural-language prompt and audio tags (`[whispers]`, `[excited]`). Output PCM 16-bit 24 kHz base64 in `interaction.output_audio.data`. 32k-token session limit. NICE only. | https://ai.google.dev/gemini-api/docs/speech-generation |
 | Pricing | 3.8 Flash paid: $0.75 in / $3.75 out per 1M (promo to 31 Dec 2026). 3.1 Flash TTS: $1 text in / $20 audio out per 1M. Free tier: free. | https://ai.google.dev/gemini-api/docs/pricing |
-| Rate limits | **MEASURED 2026-09-07, not third-party: the free tier is 5 RPM on `gemini-3.8-flash`, not the ~10 RPM previously recorded here.** Verbatim from the 429: `Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 5, model: gemini-3.8-flash`. One job is 4–5 Gemini calls, so **a single job very nearly exhausts the free per-minute quota** and two concurrent runs cannot both succeed. Billing (Tier 1) is not a nice-to-have before submission, it is a requirement. | measured; https://ai.google.dev/gemini-api/docs/rate-limits |
+| Rate limits | **MEASURED 2026-09-07, twice, and the second measurement is the one that bites. First: `limit: 5` on `generativelanguage.googleapis.com/generate_content_free_tier_requests` — a per-minute cap. Then, during Phase 1, the SAME metric started returning `limit: 20` and kept returning it after 70 s and again after 7 minutes of complete idleness.** A per-minute bucket resets in 60 s, so the binding constraint is not RPM: it is a longer-window free-tier request cap (a daily RPD cap is the obvious reading; the 429 does not name the window, so this file does not claim to know which). Consequence: **the free tier allows roughly twenty `gemini-3.8-flash` requests per day across the whole project**, and one pipeline run is 4–5 of them. That is four runs a day — not enough to iterate a prompt, and not enough to survive a judge and a demo on the same day. Enabling billing (Tier 1) is a hard prerequisite for Phase 1 onward, not a submission-week checklist item. Verbatim: `Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash`. | measured; https://ai.google.dev/gemini-api/docs/rate-limits |
 | Thinking | `generation_config.thinking_level` accepts only `low` \| `medium` \| `high` on `gemini-3.8-flash` — `"minimal"` is a 400 (`'minimal' is not a supported thinking level for this model`), despite the SDK's union type listing it. Default thinking is not free: a trivial text prompt spent **209 thought tokens and 16.5 s** wall clock. Budget this against the "60–90 s clip in under 2 min" demo target — 5 sequential calls of that shape is already ~80 s before any audio is processed. `thinking_level: "low"` is the lever if Phase 4 runs slow. | measured 2026-09-07 |
 
 Verified JS shapes (from the docs, verbatim):
@@ -59,6 +59,19 @@ const parsed = zodSchema.parse(JSON.parse(interaction.output_text));
   2026-09-07 against the full `Analysis` shape from SPEC §b plus a deliberately
   reused sub-object: Zod 4 **inlines** repeated schemas rather than emitting
   `$defs`, so the SPEC schemas convert cleanly. Re-check if Zod is upgraded.
+
+## ffmpeg acoustic measurement (Phase 1, measured on this machine)
+
+ffmpeg 6.1.1-3ubuntu5. Measured on `fixtures/sample_60s.mp3` (63.1 s, 16 kHz mono,
+mean -16.4 dBFS after the `loudnorm` pass described in `fixtures/README.md`).
+
+| Item | Verified value |
+|---|---|
+| Duration | `ffprobe -show_entries format=duration` reads it from the container; no decode needed. |
+| Mean level | `-af volumedetect` prints `mean_volume: -16.4 dB` on **stderr**. |
+| Silence detection | **A fixed threshold does not work.** On this clip `-33 dB` finds **0** pauses (as do -35 and -40), while `-22.4 dB` (mean - 6) finds **9** and `-18 dB` finds 26, many of them mid-word. The threshold has to be derived from the clip's own mean. `src/modules/localize/acoustics.ts` walks mean - {4, 6, 8, 12, 16} dB and stops at the first density between 6 and 15 pauses per minute; the fixture selects mean - 6. |
+| Energy series | `asetnsamples=n=8000,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-` emits one value per window on **stdout** (not stderr, unlike every other filter here). 0.5 s windows over 63.1 s give **127 windows**, 5 of them at or above median + 3 dB. |
+| Digital silence | astats reports `-inf`, which is not a usable number; floored at -120 dBFS in `parseRmsWindows`. |
 
 ## Cloud Text-to-Speech
 
