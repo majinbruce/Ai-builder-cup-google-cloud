@@ -259,6 +259,177 @@ export const Corroboration = z.object({
   boundariesTotal: z.number().int().nonnegative(),
 });
 
+/**
+ * ============================================================================
+ * Stage 2 — Adapt
+ * ============================================================================
+ *
+ * docs/SPEC.md section b. Three things happen here and they are deliberately
+ * three schemas rather than one: a brief is written over the whole analysis, a
+ * glossary fixes terminology once, and only then is each segment re-taught in
+ * Hindi. Modelled on how a human localizer works, because a stateless
+ * per-segment call with no shared vocabulary is exactly the machine that
+ * produces flat, inconsistent output.
+ */
+
+/** Why a rendering is not word-for-word. One kind per recorded choice. */
+export const ChoiceKind = z.enum([
+  "idiom",
+  "cultural_reference",
+  "term_kept_english",
+  "restructured",
+  "added_clarifier",
+  "register_shift",
+]);
+
+/**
+ * One non-literal decision, with its reason.
+ *
+ * `why` is written for a learner or an educator, not for a developer: the
+ * reasoning panel puts it on screen, and the product's claim is that the
+ * machine's judgment is auditable by the person who has to trust it. A `why`
+ * that only a translator could evaluate would fail that claim quietly.
+ */
+export const AdaptationChoice = z.object({
+  kind: ChoiceKind,
+  original: z.string(),
+  adapted: z.string(),
+  why: z.string(),
+});
+
+/**
+ * One term, decided once for the whole job.
+ *
+ * The glossary exists for exactly one reason: consistency. `closure` must not
+ * be one word in segment 3 and a different word in segment 11, because a
+ * learner tracking new vocabulary across a lecture cannot tell a synonym from a
+ * second concept. That is why it lives at the adaptation level and is written
+ * before any segment is adapted, rather than being collected from the segments
+ * afterwards — collected-afterwards is a report of the drift, not a fix for it.
+ */
+export const GlossaryEntry = z.object({
+  english: z.string(),
+  decision: z.enum(["transliterate", "translate", "keep_english_concept"]),
+  /** Devanagari, e.g. "क्लोज़र". Never Latin script — see AdaptedSegment.targetText. */
+  targetForm: z.string(),
+  why: z.string(),
+});
+
+/**
+ * Stage 2a: what a human localizer writes for themselves before starting.
+ *
+ * `registerGuidance` is guidance on matching THIS speaker, not on being lively.
+ * A dry lecture stays dry — inventing enthusiasm the speaker never had is
+ * editorializing rather than localizing, and the product's whole premise is
+ * that the original's instructional intent survives intact.
+ */
+export const AdaptationBrief = z.object({
+  topic: z.string(),
+  audience: z.string(),
+  instructorPersona: z.string(),
+  registerGuidance: z.string(),
+  glossary: z.array(GlossaryEntry),
+});
+
+/**
+ * Stage 2b: one segment, re-taught.
+ *
+ * `targetText` is DEVANAGARI ONLY, including transliterated technical terms.
+ * That is a synthesis constraint, not a stylistic preference: this exact string
+ * is what goes to Chirp 3 HD on `hi-IN`, and embedded Latin script is an
+ * unverified pronunciation risk on that voice. The English form of a term
+ * travels separately in the glossary, so the reasoning panel can still show the
+ * learner "closure" on screen without ever sending it to the synthesizer.
+ * Enforced after parsing by findLatinRuns() in drift.ts, because a regex in the
+ * schema would reject the whole call for one stray word rather than sending
+ * that one segment back through the retry path.
+ *
+ * `literalText` is the control condition. Without it the reasoning panel asserts
+ * that a choice was better than the literal rendering; with it, the reader sees
+ * both and decides. It is the cheapest honesty in the whole pipeline.
+ */
+export const AdaptedSegment = z.object({
+  id: z.string(),
+  targetText: z.string(),
+  literalText: z.string(),
+  /** Glossary `english` keys used in this segment, for the UI's term links. */
+  termsUsed: z.array(z.string()),
+  rationale: z.string(),
+  /** Target-language tokens to stress in TTS, derived from the source emphasis. */
+  emphasisTerms: z.array(z.string()),
+  choices: z.array(AdaptationChoice),
+  ttsHints: z.object({
+    speakingRate: z.number().min(0.7).max(1.3),
+    pauseBefore: z.enum(["none", "short", "long"]),
+    style: z.string(),
+  }),
+});
+
+/**
+ * The stage 2 artifact: the brief plus every adapted segment.
+ *
+ * This is the STORAGE and API shape. No model call ever returns it — the brief
+ * call returns AdaptationBrief and each adapt call returns one AdaptedSegment.
+ * Keeping the persisted shape separate from the model-facing shapes is what
+ * holds every request's `response_format` to two levels of nesting, which
+ * docs/SPEC.md section g lists as a live structured-output risk.
+ */
+export const Adaptation = z.object({
+  targetLanguage: z.string(),
+  brief: AdaptationBrief,
+  segments: z.array(AdaptedSegment).min(1),
+});
+
+/**
+ * ============================================================================
+ * Stage 3 — Critique
+ * ============================================================================
+ *
+ * A blind back-translation check, and the project says exactly that rather than
+ * calling it an independent review: it is the same model family scoring output
+ * it produced. What blinding buys is real and narrow — buildCritiqueInput() in
+ * critique.stage.ts constructs the critic's input from the source text and the
+ * Hindi alone, so the rationale, the brief and the glossary are structurally
+ * unreachable and a bad choice cannot be laundered by reading its own
+ * justification. The rubric is published and the raw scores are shown including
+ * the failures, which is the honest form of that evidence.
+ */
+export const SegmentCritique = z.object({
+  id: z.string(),
+  backTranslation: z.string(),
+  fidelity: z.number().int().min(0).max(100),
+  /**
+   * Scored separately from fidelity and on a different question. Fidelity asks
+   * "does it still teach the same thing"; naturalness asks "would an Indian
+   * instructor say this sentence out loud". A segment can be perfectly faithful
+   * and still be unusable translationese, and only the second score catches
+   * that — which is why the risk table's mitigation for stiff Hindi is this
+   * field rather than a prompt asking for better writing.
+   */
+  naturalness: z.number().int().min(0).max(100),
+  /** Specific stiff constructions, quoted, so the score is checkable. */
+  translationese: z.array(z.string()),
+  signalPreserved: z.boolean(),
+  emphasisPreserved: z.boolean(),
+  issues: z.array(z.string()),
+  suggestion: z.string().optional(),
+});
+
+export const Critique = z.object({
+  overallFidelity: z.number().int().min(0).max(100),
+  overallNaturalness: z.number().int().min(0).max(100),
+  segments: z.array(SegmentCritique).min(1),
+});
+
+export type ChoiceKind = z.infer<typeof ChoiceKind>;
+export type AdaptationChoice = z.infer<typeof AdaptationChoice>;
+export type GlossaryEntry = z.infer<typeof GlossaryEntry>;
+export type AdaptationBrief = z.infer<typeof AdaptationBrief>;
+export type AdaptedSegment = z.infer<typeof AdaptedSegment>;
+export type Adaptation = z.infer<typeof Adaptation>;
+export type SegmentCritique = z.infer<typeof SegmentCritique>;
+export type Critique = z.infer<typeof Critique>;
+
 export type PedagogicalSignal = z.infer<typeof PedagogicalSignal>;
 export type Register = z.infer<typeof Register>;
 export type Pace = z.infer<typeof Pace>;

@@ -121,6 +121,22 @@ export function audioPart(filePath: string): InputPart {
   return { type: "audio", data: bytes.toString("base64"), mime_type: mimeType };
 }
 
+/**
+ * How hard the model thinks before answering.
+ *
+ * `"minimal"` is deliberately absent even though the SDK's union type lists it:
+ * measured 2026-09-07, `gemini-3.8-flash` returns a 400 — `'minimal' is not a
+ * supported thinking level for this model` (docs/research.md). Narrowing the
+ * type here turns a runtime 400 into a compile error.
+ *
+ * Left unset, the model uses its default, which Phase 1 measured at 18,000-20,600
+ * thought tokens for one analyze call — ~90% of generated tokens and the
+ * dominant latency term. This is the lever docs/SPEC.md section g names for the
+ * two-minute demo budget, and it is a per-stage decision: a stage whose job is
+ * judgment should think, and a mechanical one should not have to.
+ */
+export type ThinkingLevel = "low" | "medium" | "high";
+
 /** Anything with a `.debug()` — Fastify's logger, or a script's stand-in. */
 export interface CallLogger {
   debug: (details: Record<string, unknown>, message: string) => void;
@@ -135,6 +151,8 @@ export interface GenerateJsonOptions<T extends z.ZodType> {
   parts?: InputPart[];
   /** Which pipeline stage this call belongs to, for the telemetry row. */
   stage: ModelCallStage;
+  /** Omit to leave the model at its default thinking budget. */
+  thinkingLevel?: ThinkingLevel;
   logger?: CallLogger;
 }
 
@@ -158,7 +176,7 @@ export interface GenerateJsonResult<T> {
 export async function generateJson<T extends z.ZodType>(
   options: GenerateJsonOptions<T>
 ): Promise<GenerateJsonResult<z.infer<T>>> {
-  const { schema, prompt, parts = [], stage, logger } = options;
+  const { schema, prompt, parts = [], stage, thinkingLevel, logger } = options;
 
   // `$schema` is a JSON Schema meta-annotation; Gemini's structured output
   // takes an OpenAPI-flavoured subset and has no use for it.
@@ -179,6 +197,13 @@ export async function generateJson<T extends z.ZodType>(
       mime_type: "application/json",
       schema: jsonSchema,
     },
+    // Spread rather than passed as an explicit undefined: exactOptionalPropertyTypes
+    // is on, and an explicit `thinking_level: undefined` is also the shape most
+    // likely to be serialized into the request body as a null and rejected.
+    // Omitting the key entirely is what "use the model's default" has to mean.
+    ...(thinkingLevel === undefined
+      ? {}
+      : { generation_config: { thinking_level: thinkingLevel } }),
   });
 
   const latencyMs = Math.round(performance.now() - startedAt);
@@ -241,7 +266,10 @@ export async function generateJson<T extends z.ZodType>(
     latencyMs,
   };
 
-  logger?.debug({ ...call }, `gemini ${stage}`);
+  logger?.debug(
+    { ...call, thinkingLevel: thinkingLevel ?? "default" },
+    `gemini ${stage}`
+  );
 
   return { data, call, raw: interaction };
 }
