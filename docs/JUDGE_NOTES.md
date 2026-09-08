@@ -156,3 +156,92 @@ of this shape cannot fit the two-minute demo budget, so SPEC §g's `thinking_lev
 lever is now known to be necessary rather than optional. The catch is that the
 1,864-token run was also the worst one, so latency bought with `low` has to be
 judged on output, not on the clock.
+
+---
+
+## Phase 2 — Adapt + blind critique with auditable rationale
+
+**"Your architecture diagram is Gemini calling Gemini and then Gemini grading
+Gemini. The 'independent fidelity score' is the same model marking its own
+homework, and the 'auditable rationale' is the model writing its own defence
+statement. Strip out the vocabulary and what is left that a judge should count
+as meaningful use of Gen AI, rather than one model call wearing three hats?"**
+
+Three things, and the first is that the project does not make the claim being
+attacked. Nothing here calls the critique independent: `critique.stage.ts` opens
+by saying it is the same model family scoring output it produced, the CLI prints
+that sentence above its own summary, and SPEC §b says it in the spec itself.
+What is claimed is narrower and is a property of the code rather than of the
+prompt — the critic is *blind*. `buildCritiqueInput()` builds the critic's entire
+payload out of four things: the source English, the pedagogical signal label, the
+terms the **speaker** stressed, and the Hindi. The rationale, the brief, the
+glossary, `literalText`, the TTS hints and even the adapter's own `emphasisTerms`
+list are not withheld by instruction, they are unreachable from the value that
+function returns, and `test/adapt.test.ts` seeds every one of those fields with a
+unique sentinel and asserts none of them appears anywhere in the serialized
+payload. That last exclusion is the one worth pointing at: `emphasisPreserved`
+asks whether the stressed terms survived, so handing the critic the adapter's own
+claim about which Hindi tokens carry the stress would be asking it to check an
+assertion against itself. It gets the English terms and has to find them. A
+prompt that says "ignore the rationale" is a promise; a function that never puts
+the rationale in the request is a mechanism, and only one of those survives a
+future contributor adding a field. The second thing is that the blind pass
+demonstrably catches something. On a run with the threshold raised to exercise
+the path, the critic scored s04 at naturalness 78 and quoted the exact substring
+`"इस बात की कहीं ज़्यादा भरपाई कर सकता है कि"` as a calque of the English "make
+up for the fact that" — and the retry restructured precisely that clause into a
+फ़ायदा/नुक़सान contrast while leaving the rest of the segment alone. Two
+independent critique runs, at different thinking levels, both flagged the same
+segment and both quoted the same substring, which is the difference between a
+scorer with a rubric and a random number with a decimal point. The third is that
+the "one model wearing three hats" framing describes a pipeline this deliberately
+is not: the adapter never sees the critique's rubric, the critic never sees the
+adapter's reasoning, and the brief is written before any segment exists so the
+glossary cannot be rationalized backwards from what got produced. Gen AI is
+load-bearing at every one of those stages — the pedagogical re-teaching, the
+per-choice justification, the back-translation and the two-axis scoring are all
+things nothing else in the system can produce — but the *architecture* around
+them is what makes their output checkable, and that architecture is ordinary
+typed code with tests.
+
+**"Then why should anyone believe the two scores are measuring different
+things, rather than one judgment reported twice?"** Because on the fixture they
+come apart, and they come apart in the direction the design predicted. Fidelity
+across the eight segments sits at 92-96 while naturalness ranges 82-95, and the
+segment that separates them most (s04: fidelity 92, naturalness 82) is exactly
+the one carrying an English relative-clause calque — faithful, and stiff. That is
+the failure mode SPEC §g's risk table names for Hindi output and the reason
+naturalness exists as a second axis rather than as a component of the first; had
+the two scores tracked each other, the honest report would have been that the
+second axis is decorative. It also survives its own strictest rule: the prompt
+requires that any naturalness score below 90 carry a **verbatim quote** from the
+Hindi, so a low score with no quotable evidence is not expressible.
+
+**The parts of this phase that cost us something, recorded because they are the
+parts a judge should press on.** First, the phase misses the demo budget and the
+number is in `research.md` rather than rounded off: adapt is 110.0 s for eight
+segments, stages 2-3 are 138.5 s, and a full run with Phase 1's analyze call is
+~205 s against SPEC §g's 120 s target. One call per segment is what bought the
+sequential context, the shallow schemas and the cheap retry, and it is also what
+blew the budget; the lever is chosen but not yet pulled on the stage that would
+actually pay for it, because `low` on adapt has to be judged on the Hindi and has
+not been. Second, `thinking_level` was decided with numbers rather than taste —
+`low` on critique gives **0** thought tokens and 7.7 s instead of 14.9 s, with
+every score within 3 points and the same translationese quote on the same
+segment — but that decision was only defensible because the comparison was made
+on the artifact, per Phase 1's finding that its fastest run was also its worst.
+Third, the retry gate fires on **0 of 8** segments at the real threshold of 70,
+so the loop's demonstration required deliberately raising the threshold, and this
+file says so rather than letting a passing run imply the path was exercised.
+Fourth and most importantly, the length-drift result is an **estimate and is
+labelled as one in the schema comment, the CLI output, the research note and
+here**: −2% overall on the fixture is computed by dividing a character count by an
+assumed 13 Devanagari characters per second, and the honest number cannot exist
+until Phase 3 synthesizes real audio and divides its measured duration by the
+characters that produced it. It settles SPEC §g's open drift risk well enough
+that Phase 3 need not compress `speaking_rate`, and it is not a measurement, and
+conflating those two would be exactly the sort of third fabricated metric that
+Phase 1 spent its own credibility avoiding. The one number in this phase produced
+by nothing but arithmetic and a regex — 0 of 8 segments containing Latin script
+in the string bound for a Hindi TTS voice — is the only one here that owes the
+model nothing at all.
