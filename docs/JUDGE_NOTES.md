@@ -100,20 +100,59 @@ same as wrong — stress is carried by pitch and lengthening as much as by level
 and this pass measures level and silence, so the rate is a floor on
 corroboration rather than a score for the model. That is exactly why it reports
 and never fails the run: a number that can break a build is a number under
-pressure to look good. Third, and most importantly for anyone reading this
-before the demo: **as of this commit the corroboration rate on the fixture is
-unmeasured, because the Gemini free tier cut the run off.** The 429 reports
-`limit: 20` on `generate_content_free_tier_requests` and returns it unchanged
-after seven minutes of idleness, so the binding cap is not the 5 RPM previously
-recorded — it is a longer-window request cap that today's runs exhausted
-(`docs/research.md` now says so). The measurement half of the stage runs and is
-shown above; the model half is written, typechecked, schema-bound and covered by
-82 passing unit tests, and has not yet produced a real analysis. Billing is
-therefore a prerequisite for finishing Phase 1, not a submission-week checklist
-item. This entry gets the actual numbers appended the moment a real run lands,
-and if the corroboration rate comes back poor, that number goes here too.
-(Correction, same day: billing was subsequently attached to the project, and
-the 429 changed to `Your prepayment credits are depleted` — reproduced twice.
-So the account is on prepaid billing at a zero balance rather than on the free
-tier, and the blocker is funding, not rate. The AI Studio prepay balance has to
-be topped up before any Gemini call in this repo succeeds.)
+pressure to look good.
+
+**The numbers, now measured (2026-09-08).** The blocker above was a funding one
+— prepaid billing at a zero balance, not a rate limit — and it was resolved by
+topping the balance up; the diagnosis held and no code changed. Five real runs
+on the fixture since then: emphasis corroboration is **84–87%**, stable run to
+run, and **8 of 9 signal labels are identical across independent runs** with
+boundaries within 0.8 s, which is the answer to "isn't a non-deterministic
+labeler just a coin flip". But the number this project actually cites is lower
+and is the one below.
+
+---
+
+## Phase 1 (completed) — what the first real runs changed
+
+**"You built the corroboration check yourself, you chose its thresholds, and you
+report its result. Why is an 84% number that a system awards itself evidence of
+anything?"**
+
+Because the first thing it did when pointed at real output was cost us the 84%.
+Corroboration marks a claim `supported` on either of two branches — an energy
+rise measured inside the span, or a pause closing the span — and the analyze
+prompt *instructs* the model to cut segments at the measured pauses. So the
+second branch partly rewards the model for following an instruction rather than
+for hearing anything, and pooling the two produced a headline that flattered
+itself. Splitting them (`supportedByEnergy` vs `supportedByPauseOnly`) puts the
+defensible figure at **53%**, not 84%, and the CLI now prints "read the energy
+number, not the headline" above its own summary. The same pass found the
+boundary metric counting each interior cut twice and including the clip's own
+0.0 and duration — boundaries no model chose and none can align to — reporting a
+real 4-of-8 as "8/18 (44%)". Both were reporting bugs that made the project look
+better, both were invisible to 84 passing unit tests because synthetic fixtures
+only ever exercise one branch at a time, and both are fixed. The strongest
+evidence that the metric is not decorative, though, is the run where it went
+*up*: one analyze call scored 83% boundary alignment and 100% emphasis support
+in 15.7 s, and it was the worst output of the five — it had obeyed "cut at the
+pauses" so literally that it split a list from the words introducing it and put
+one definition's subject in one segment and its predicate in the next. Every
+number improved while the thing stage 1 exists to produce was destroyed. That
+run is why `analyze.v1.md` now says the instructional move wins over the pause,
+why alignment fell back to 44% once the segmentation was correct again, and why
+`docs/research.md` records "treat a rising alignment number as a warning sign,
+not progress". A self-awarded score is worth something exactly when it is built
+to be lost, read against the artifact rather than instead of it, and published
+with its misses — which is the same standard the pipeline's critique stage will
+be held to in Phase 2, and the reason that stage is blind to the rationale it
+grades.
+
+**The cost finding, recorded because it constrains the demo.** An analyze call
+spends 18,000–20,600 thought tokens against ~2,200 output tokens and takes
+63–70 s. Thinking is ~90% of generation and the dominant latency term, and it is
+wildly variable on identical input — one run spent 1,864. Five sequential stages
+of this shape cannot fit the two-minute demo budget, so SPEC §g's `thinking_level`
+lever is now known to be necessary rather than optional. The catch is that the
+1,864-token run was also the worst one, so latency bought with `low` has to be
+judged on output, not on the clock.

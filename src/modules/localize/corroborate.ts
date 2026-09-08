@@ -66,7 +66,7 @@ export function corroborate(
     }
   }
 
-  const boundaries = analysis.segments.flatMap((s) => [s.startSec, s.endSec]);
+  const boundaries = interiorBoundaries(analysis);
   const boundariesAligned = boundaries.filter((boundary) =>
     evidence.pauses.some(
       (pause) =>
@@ -78,14 +78,52 @@ export function corroborate(
     )
   ).length;
 
+  const supportedChecks = emphasisChecks.filter((c) => c.verdict === "supported");
+
   return {
     emphasisChecks,
-    supported: emphasisChecks.filter((c) => c.verdict === "supported").length,
+    supported: supportedChecks.length,
+    // The measurement string is written by checkMarker below and is the only
+    // record of WHICH branch supported a claim, so it is what distinguishes
+    // them here. See the Corroboration schema for why the split matters.
+    supportedByEnergy: supportedChecks.filter((c) => c.measurement.startsWith("Energy"))
+      .length,
+    supportedByPauseOnly: supportedChecks.filter(
+      (c) => !c.measurement.startsWith("Energy")
+    ).length,
     unsupported: emphasisChecks.filter((c) => c.verdict === "unsupported").length,
     notMeasurable: emphasisChecks.filter((c) => c.verdict === "not_measurable").length,
     boundariesAligned,
     boundariesTotal: boundaries.length,
   };
+}
+
+/**
+ * The boundaries the model actually chose, each counted once.
+ *
+ * Segments are contiguous, so segment N's `endSec` and segment N+1's `startSec`
+ * are one decision, not two; flattening every span into a start and an end
+ * counted each interior cut twice and then added the clip's own 0.0 and its
+ * duration, neither of which is a model choice and neither of which can sit
+ * near a mid-clip pause. On the first real run that denominator turned 4 of 8
+ * genuinely aligned cuts into a reported "8/18 (44%)". Same alignment, worse
+ * number, and the wrong question answered.
+ */
+function interiorBoundaries(analysis: Analysis): number[] {
+  const cuts = new Set<number>();
+
+  for (let index = 1; index < analysis.segments.length; index += 1) {
+    const previous = analysis.segments[index - 1];
+    const current = analysis.segments[index];
+    if (previous === undefined || current === undefined) continue;
+
+    // Usually identical (contiguous segments); the Set collapses them. When the
+    // model leaves a gap they are two distinct cuts and both get judged.
+    cuts.add(previous.endSec);
+    cuts.add(current.startSec);
+  }
+
+  return [...cuts];
 }
 
 function checkMarker(

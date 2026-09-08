@@ -212,10 +212,11 @@ function printCorroboration(report: Corroboration): void {
   }
 
   const rate = ((report.supported / checked) * 100).toFixed(0);
+  const energyRate = ((report.supportedByEnergy / checked) * 100).toFixed(0);
   const alignRate =
     report.boundariesTotal === 0
-      ? "0"
-      : ((report.boundariesAligned / report.boundariesTotal) * 100).toFixed(0);
+      ? "n/a"
+      : `${((report.boundariesAligned / report.boundariesTotal) * 100).toFixed(0)}%`;
 
   out();
   out(
@@ -223,9 +224,18 @@ function printCorroboration(report: Corroboration): void {
       `${report.unsupported} unsupported · ${report.notMeasurable} not measurable`
   );
   out(
-    `  ${report.boundariesAligned}/${report.boundariesTotal} segment boundaries within 300ms ` +
-      `of a measured pause (${alignRate}%)`
+    `  of those, ${report.supportedByEnergy} by a measured energy rise (${energyRate}%) and ` +
+      `${report.supportedByPauseOnly} by a closing pause alone`
   );
+  out(
+    `  ${report.boundariesAligned}/${report.boundariesTotal} interior segment boundaries ` +
+      `within 300ms of a measured pause (${alignRate})`
+  );
+  out();
+  out("  Read the energy number, not the headline. A claim also counts as supported");
+  out("  when a pause merely closes its span — but the prompt TELLS the model to cut");
+  out("  at the measured pauses, so that branch partly rewards instruction-following.");
+  out("  Only the energy rise is something the model had to actually locate.");
   out();
   out("  Unsupported is not the same as wrong: this pass measures level and silence,");
   out("  and stress is also carried by pitch and lengthening. The rate is a floor on");

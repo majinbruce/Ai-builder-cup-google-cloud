@@ -276,6 +276,9 @@ describe("corroboration", () => {
 
     expect(report.supported).toBe(1);
     expect(report.emphasisChecks[0]?.measurement).toContain("Energy rise");
+    // Energy support is the non-circular kind and is counted separately.
+    expect(report.supportedByEnergy).toBe(1);
+    expect(report.supportedByPauseOnly).toBe(0);
   });
 
   it("supports a claim closed by a pause even with no energy rise", () => {
@@ -286,6 +289,10 @@ describe("corroboration", () => {
 
     expect(report.supported).toBe(1);
     expect(report.emphasisChecks[0]?.measurement).toContain("let that land");
+    // Still supported, but booked to the branch that carries circularity risk:
+    // the prompt tells the model to cut at pauses, so this is weaker evidence.
+    expect(report.supportedByEnergy).toBe(0);
+    expect(report.supportedByPauseOnly).toBe(1);
   });
 
   it("marks a claim unsupported when nothing was measured under it", () => {
@@ -304,15 +311,54 @@ describe("corroboration", () => {
     expect(report.unsupported).toBe(0);
   });
 
+  /** Two contiguous segments cut at `cutSec`, so there is exactly one boundary. */
+  const twoSegmentsCutAt = (cutSec: number, endSec: number): Analysis =>
+    Analysis.parse({
+      sourceLanguage: "en",
+      topic: "test",
+      audience: "test",
+      segments: [0, 1].map((index) => ({
+        id: `s0${index + 1}`,
+        startSec: index === 0 ? 0 : cutSec,
+        endSec: index === 0 ? cutSec : endSec,
+        text: "some spoken text",
+        signal: "key_term",
+        signalConfidence: 0.8,
+        signalEvidence: "the speaker names the term",
+        register: "neutral",
+        pace: "normal",
+        emphasis: [],
+        idioms: [],
+        keyTerms: [],
+      })),
+    });
+
   it("counts boundaries landing near a real pause, at either edge", () => {
     const report = corroborate(
-      analysisWith("x", 0, 11.8),
+      twoSegmentsCutAt(11.8, 20),
       evidenceWith({ pauses: [{ startSec: 11.7, endSec: 11.95, durationSec: 0.25 }] })
     );
 
-    // 0 is nowhere near a pause; 11.8 is 0.1s from one starting at 11.7.
-    expect(report.boundariesTotal).toBe(2);
+    // The single interior cut at 11.8 is 0.1s from a pause starting at 11.7.
+    expect(report.boundariesTotal).toBe(1);
     expect(report.boundariesAligned).toBe(1);
+  });
+
+  it("counts a shared boundary once, not once per adjoining segment", () => {
+    const report = corroborate(twoSegmentsCutAt(11.8, 20), evidenceWith({}));
+
+    // Segment 1 ends at 11.8 and segment 2 starts at 11.8: one decision.
+    expect(report.boundariesTotal).toBe(1);
+  });
+
+  it("excludes the clip's own start and end from the boundary denominator", () => {
+    // A single segment spans the whole clip and cuts nothing, so there is no
+    // boundary to judge. Counting 0.0 and the duration here is what turned 4 of
+    // 8 real alignments into a reported 8/18 on the first live run.
+    const report = corroborate(analysisWith("x", 0, 11.8), evidenceWith({}));
+
+    expect(report.boundariesTotal).toBe(0);
+    expect(report.boundariesAligned).toBe(0);
   });
 });
 

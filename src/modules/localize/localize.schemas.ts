@@ -229,9 +229,32 @@ export const EmphasisCheck = z.object({
 export const Corroboration = z.object({
   emphasisChecks: z.array(EmphasisCheck),
   supported: z.number().int().nonnegative(),
+  /**
+   * The subset of `supported` backed by a measured energy rise.
+   *
+   * Split out on 2026-09-08 after the first real run, because the combined
+   * number was not honest evidence. A claim also scores `supported` when a
+   * pause merely closes its span — but `analyze.v1.md` instructs the model to
+   * place segment boundaries at the measured pauses, so that branch partly
+   * rewards the model for following an instruction rather than for hearing
+   * anything. Energy corroboration carries no such circularity: nothing tells
+   * the model where the loud windows are except the audio and the measurement
+   * block, and it has to put a claim inside one.
+   *
+   * Report both. `supportedByEnergy` is the number that survives a judge.
+   */
+  supportedByEnergy: z.number().int().nonnegative(),
+  /** The circular-risk subset: supported only by a pause closing the span. */
+  supportedByPauseOnly: z.number().int().nonnegative(),
   unsupported: z.number().int().nonnegative(),
   notMeasurable: z.number().int().nonnegative(),
-  /** Segment boundaries landing within BOUNDARY_TOLERANCE_SEC of a real pause. */
+  /**
+   * INTERIOR segment boundaries landing within BOUNDARY_TOLERANCE_SEC of a
+   * real pause. Interior is the operative word: the clip's own start and end
+   * are not choices the model made and can never align with a mid-clip pause,
+   * so counting them only dilutes the rate. Shared boundaries between adjacent
+   * segments are counted once, not twice.
+   */
   boundariesAligned: z.number().int().nonnegative(),
   boundariesTotal: z.number().int().nonnegative(),
 });

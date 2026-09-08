@@ -30,9 +30,19 @@ recap is two.
 - Cover the whole clip. Segments run in order and do not overlap.
 - `id` is `s01`, `s02`, … in order, zero-padded to two digits.
 - `startSec` and `endSec` are seconds from the start of the clip, with one
-  decimal place. Use the measured silences below to place them: a boundary that
-  falls in the middle of a word is wrong, and the pause list tells you where the
-  speaker actually stopped.
+  decimal place. The measured silences below are **candidate** boundaries, not
+  required ones. Use them to place a cut you already decided to make — they tell
+  you where the speaker actually stopped, so a boundary lands between words
+  rather than inside one.
+- **The instructional move wins over the pause.** Not every measured silence is
+  a segment boundary; speakers pause mid-sentence to breathe, for effect, and
+  before a subordinate clause. Never cut inside a grammatical clause, never
+  separate a list from the words introducing it, and never split one definition
+  across two segments so that its subject sits in one and its predicate in the
+  next. If the nearest pause would do any of those, ignore that pause and cut
+  where the instructional move actually ends — or do not cut there at all.
+  A segment that is one clean teaching move with no pause at its edge is
+  correct; a segment that starts mid-clause on a measured pause is wrong.
 - `text` is a verbatim transcript of that span. Transcribe what was said,
   including a false start if there is one. Do not clean it up, do not summarize.
 
@@ -56,6 +66,12 @@ contract — do not invent labels, and do not stretch one to fit.
 
 - `definition` beats `key_term` when both apply.
 - `warning` beats `emphasis_shift` when both apply.
+- `warning` is about **the learner's** conduct: it marks a mistake *they* could
+  make or a consequence *they* should avoid. Someone else being wrong is not a
+  warning. A historical figure's failed attempt, a rejected hypothesis, or a
+  wrong answer the speaker presents and then corrects is an `example` — it
+  illustrates the concept, it does not caution the listener. Label it `warning`
+  only if the learner could plausibly repeat the mistake.
 
 `signalConfidence` is your genuine confidence in the label, 0 to 1. A segment
 that sits between two labels should score around 0.5 — a run where everything is
