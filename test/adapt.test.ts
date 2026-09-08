@@ -16,7 +16,7 @@ import {
 import {
   charBudget,
   countSpokenChars,
-  ESTIMATED_CHARS_PER_SEC,
+  MEASURED_CHARS_PER_SEC,
   findLatinRuns,
   measureDrift,
 } from "../src/modules/localize/drift.ts";
@@ -352,7 +352,11 @@ describe("length budgets and drift", () => {
     const long = charBudget({ startSec: 0, endSec: 10 });
 
     expect(long).toBeGreaterThan(short);
-    expect(long).toBeCloseTo(short * 2, 0);
+    // Within one rounding quantum of exactly double, rather than exactly double:
+    // charBudget() rounds to the nearest 5 so a prompt cannot read it as an exact
+    // target, and rounding two spans independently does not distribute over
+    // doubling. At 12.72 chars/sec, 5s budgets 65 and 10s budgets 125.
+    expect(Math.abs(long - short * 2)).toBeLessThanOrEqual(5);
   });
 
   it("rounds the budget so a prompt cannot read it as an exact target", () => {
@@ -366,19 +370,23 @@ describe("length budgets and drift", () => {
   });
 
   it("computes per-segment and overall drift against the source spans", () => {
-    // 26 spoken characters at 13 chars/sec is an estimated 2.0s against a 1.0s
-    // source span: +100%, well outside tolerance.
-    const text = "क".repeat(2 * ESTIMATED_CHARS_PER_SEC);
+    // Two seconds' worth of characters against a 1.0s source span: +100%, well
+    // outside tolerance. The count is DERIVED from the rate rather than written
+    // as a literal, because MEASURED_CHARS_PER_SEC stopped being a whole number
+    // when Phase 3 measured it (12.72, not the estimated 13) and a test that
+    // assumes an integer breaks on a voice change rather than on a real defect.
+    const chars = Math.round(2 * MEASURED_CHARS_PER_SEC);
+    const text = "क".repeat(chars);
     const report = measureDrift(
       [{ id: "s01", startSec: 0, endSec: 1 }],
       [{ id: "s01", targetText: text }]
     );
 
-    expect(report.segments[0]?.chars).toBe(26);
-    expect(report.segments[0]?.estimatedTargetSec).toBe(2);
-    expect(report.segments[0]?.ratio).toBeCloseTo(1, 5);
+    expect(report.segments[0]?.chars).toBe(chars);
+    expect(report.segments[0]?.estimatedTargetSec).toBeCloseTo(2, 1);
+    expect(report.segments[0]?.ratio).toBeCloseTo(1, 1);
     expect(report.segments[0]?.overTolerance).toBe(true);
-    expect(report.ratio).toBeCloseTo(1, 5);
+    expect(report.ratio).toBeCloseTo(1, 1);
     expect(report.overToleranceCount).toBe(1);
   });
 
@@ -391,11 +399,15 @@ describe("length budgets and drift", () => {
         { id: "s01", startSec: 0, endSec: 1 },
         { id: "s02", startSec: 1, endSec: 2 },
       ],
-      [{ id: "s01", targetText: "क".repeat(ESTIMATED_CHARS_PER_SEC) }]
+      [{ id: "s01", targetText: "क".repeat(Math.round(MEASURED_CHARS_PER_SEC)) }]
     );
 
     expect(report.segments).toHaveLength(1);
-    expect(report.ratio).toBe(0);
+    // One second of speech against a one-second span. The assertion that matters
+    // is that s02 contributed NOTHING: had it been scored as a zero-length
+    // adaptation, the overall ratio would be about -50%, not about 0.
+    expect(report.segments[0]?.id).toBe("s01");
+    expect(report.ratio).toBeCloseTo(0, 1);
   });
 });
 

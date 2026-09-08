@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import fsp from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -275,4 +277,108 @@ export async function measureRmsWindows(
   }
 
   return windows;
+}
+
+/**
+ * ============================================================================
+ * Assembly — Phase 3. Turning per-segment synthesis into one playable file.
+ * ============================================================================
+ */
+
+/**
+ * Escapes one path for ffmpeg's concat demuxer list format.
+ *
+ * Two separate hazards, both handled here rather than at the call site.
+ *
+ * Quoting: the list is `file '<path>'` lines, and a single quote inside a path
+ * ends the quoting early. The documented escape is to close the quote, emit a
+ * literal backslash-quote, and reopen. A path with a quote in it is unlikely
+ * while we generate the names, and it stops being unlikely in Phase 4 when job
+ * ids reach the filesystem.
+ *
+ * Absolutization: the demuxer resolves a relative path in the list against the
+ * LIST FILE's directory, not the process working directory. Measured 2026-09-08
+ * — passing `outputs/segments/s01.wav` in a list written to `outputs/` made
+ * ffmpeg look for `outputs/outputs/segments/s01.wav` and fail. Resolving here
+ * means no caller has to know that, and a relative path is not silently
+ * reinterpreted.
+ */
+export function escapeConcatPath(filePath: string): string {
+  return `file '${path.resolve(filePath).replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Concatenates same-format audio files into one.
+ *
+ * The concat DEMUXER (`-f concat`) rather than the filter, because the inputs
+ * are all LINEAR16 WAV from the same voice at the same sample rate, so this is a
+ * byte-level join with no re-encode and no resampling — the output duration is
+ * exactly the sum of the inputs. That property is load-bearing for Phase 3,
+ * which measures real durations to replace an estimated constant: a join that
+ * quietly added or dropped milliseconds would corrupt the measurement it exists
+ * to enable.
+ */
+export async function concatAudio(
+  inputPaths: string[],
+  outPath: string
+): Promise<void> {
+  if (inputPaths.length === 0) {
+    throw new Error("concatAudio was given no inputs. There is nothing to join.");
+  }
+
+  const listPath = `${outPath}.concat.txt`;
+  await fsp.writeFile(listPath, inputPaths.map(escapeConcatPath).join("\n"), "utf8");
+
+  try {
+    await run(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-nostats",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        listPath,
+        "-c",
+        "copy",
+        outPath,
+      ],
+      { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
+    );
+  } finally {
+    await fsp.rm(listPath, { force: true });
+  }
+}
+
+/**
+ * Encodes to the pipeline's canonical 16 kHz mono MP3.
+ *
+ * The same format ingest normalizes uploads to (docs/SPEC.md stage 0), so
+ * `output.mp3` and `source.mp3` are the same shape and the side-by-side player
+ * in Phase 4 has one decoder path rather than two.
+ */
+export async function encodeMp3(inPath: string, outPath: string): Promise<void> {
+  await run(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-nostats",
+      "-y",
+      "-i",
+      inPath,
+      "-ar",
+      "16000",
+      "-ac",
+      "1",
+      "-codec:a",
+      "libmp3lame",
+      "-q:a",
+      "4",
+      outPath,
+    ],
+    { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
+  );
 }

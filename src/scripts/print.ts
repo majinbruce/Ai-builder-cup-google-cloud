@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { measureDrift, type DriftReport } from "../modules/localize/drift.ts";
+import {
+  MEASURED_CHARS_PER_SEC,
+  measureDrift,
+  type DriftReport,
+} from "../modules/localize/drift.ts";
 import { RETRY_THRESHOLD } from "../modules/localize/critique.stage.ts";
 import type {
   Adaptation,
@@ -11,6 +15,7 @@ import type {
   Critique,
   ModelCall,
   SegmentCritique,
+  Synthesis,
 } from "../modules/localize/localize.schemas.ts";
 
 /**
@@ -236,5 +241,122 @@ export function printCalls(calls: ModelCall[]): void {
       `${total((c) => c.outputTokens)} out · ${total((c) => c.thoughtTokens)} thinking · ` +
       `${(total((c) => c.latencyMs) / 1000).toFixed(1)}s in the model`
   );
+  out();
+}
+
+/**
+ * Stage 4's report: how each segment was actually spoken.
+ *
+ * The verbatim `markupUsed` is the point. SPEC section d item 6 promises the
+ * reasoning panel shows the exact TTS settings applied, and this is the terminal
+ * version of that promise — a reader can copy a line out of here into the API
+ * explorer and get the same audio back. House style per this file's header:
+ * print the misses, which here are emphasis terms that could not be applied and
+ * segments whose Hindi runs long against their source span.
+ */
+export function printSynthesis(synthesis: Synthesis): void {
+  out("  --- how each segment was spoken (measured, not estimated) ---");
+  out();
+  out("  id    source   spoken   drift    rate   pause  emphasis");
+
+  for (const segment of synthesis.segments) {
+    const sourceSec = segment.endSec - segment.startSec;
+    const drift = sourceSec === 0 ? 0 : (segment.measuredDurationSec - sourceSec) / sourceSec;
+    const paused = segment.emphasisPausedTerm;
+
+    out(
+      `  ${segment.id.padEnd(5)} ${`${sourceSec.toFixed(1)}s`.padStart(6)} ` +
+        `${`${segment.measuredDurationSec.toFixed(1)}s`.padStart(8)} ` +
+        `${`${drift >= 0 ? "+" : ""}${(drift * 100).toFixed(0)}%`.padStart(7)}  ` +
+        `${segment.speakingRate.toFixed(2)}  ${(segment.pauseBeforeMs === 0 ? "—" : String(segment.pauseBeforeMs)).padStart(5)}  ` +
+        `${paused === null ? "none" : `pause before "${paused}"`}`
+    );
+  }
+  out();
+
+  for (const segment of synthesis.segments) {
+    out(`  ${segment.id} sent (${segment.inputMode}, ${segment.billedChars} billed chars, ${segment.latencyMs} ms):`);
+    out(`      ${segment.markupUsed}`);
+    if (segment.emphasisNotRealized.length > 0) {
+      out(
+        `      NOT REALIZED in audio (shown in the panel, not marked acoustically): ` +
+          `${segment.emphasisNotRealized.map((term) => `"${term}"`).join(", ")}`
+      );
+    }
+    if (segment.emphasisNotFound.length > 0) {
+      out(
+        `      NOT APPLIED — these emphasis terms do not occur in the segment's own ` +
+          `Hindi: ${segment.emphasisNotFound.map((term) => `"${term}"`).join(", ")}`
+      );
+    }
+    out();
+  }
+
+  const notFound = synthesis.segments.flatMap((segment) => segment.emphasisNotFound);
+  const notRealized = synthesis.segments.flatMap((s2) => s2.emphasisNotRealized);
+  const marked = synthesis.segments.filter((s2) => s2.emphasisPausedTerm !== null).length;
+
+  out(
+    notFound.length === 0
+      ? "  Every emphasis term stage 2 asked for occurs in its own Hindi."
+      : `  ${notFound.length} emphasis term(s) do NOT occur in their own segment's Hindi — see above.`
+  );
+  out(
+    `  ${marked}/${synthesis.segments.length} segments carry a pause before one term; ` +
+      `${notRealized.length} further term(s) are shown in the panel but not marked in audio.`
+  );
+  out("  Per-term STRESS is not achievable on this voice — see the spike verdict in");
+  out("  docs/research.md. A pause is a pause, and that is what these fields say.");
+  out();
+}
+
+/**
+ * The measured answer to Phase 2's estimate, printed next to what it replaces.
+ *
+ * docs/JUDGE_NOTES.md committed to this: MEASURED_CHARS_PER_SEC was a character
+ * count divided by an assumed constant, labelled an estimate everywhere it
+ * surfaced, and Phase 3 is the only place the real number can exist. Printing
+ * both is the only version of this that lets a reader see how good the guess was.
+ */
+export function printMeasuredTiming(
+  analysis: Analysis,
+  adaptation: Adaptation,
+  synthesis: Synthesis
+): void {
+  const sourceSec = analysis.segments.reduce(
+    (total, segment) => total + (segment.endSec - segment.startSec),
+    0
+  );
+  const spokenSec = synthesis.segments.reduce(
+    (total, segment) => total + segment.measuredDurationSec,
+    0
+  );
+  const estimated = measureDrift(analysis.segments, adaptation.segments);
+
+  out("  --- length drift: the estimate vs the measurement ---");
+  out();
+  out(`  source span, summed          ${sourceSec.toFixed(1)}s`);
+  out(`  projected from text alone    ${estimated.estimatedTargetSec.toFixed(1)}s  ` +
+    `(${estimated.ratio >= 0 ? "+" : ""}${(estimated.ratio * 100).toFixed(1)}%, ` +
+    `projected at ${MEASURED_CHARS_PER_SEC} chars/sec)`);
+  out(`  MEASURED, as synthesized     ${spokenSec.toFixed(1)}s  ` +
+    `(${sourceSec === 0 ? 0 : (((spokenSec - sourceSec) / sourceSec) * 100).toFixed(1)}%, ` +
+    `synthesized and ffprobe'd)`);
+  out(`  concatenated output.mp3      ${synthesis.durationSec.toFixed(1)}s`);
+  out();
+
+  const joinDelta = Math.abs(synthesis.durationSec - spokenSec);
+  out(
+    `  The join added ${joinDelta.toFixed(3)}s over the sum of its parts. ` +
+      `${joinDelta < 0.15 ? "Lossless within tolerance" : "LARGER THAN EXPECTED — check the concat"}.`
+  );
+  out();
+  out(
+    `  This run spoke ${synthesis.measuredCharsPerSec.toFixed(2)} Devanagari chars/sec WITH our pauses ` +
+      `applied, against the ${MEASURED_CHARS_PER_SEC} plain-text rate the budget uses. ` +
+      "Run --baseline to measure the plain rate again."
+  );
+  out();
+  out(`  synthesis cost: ${synthesis.billedChars} billed characters, voice ${synthesis.voice}.`);
   out();
 }

@@ -245,3 +245,96 @@ Phase 1 spent its own credibility avoiding. The one number in this phase produce
 by nothing but arithmetic and a regex — 0 of 8 segments containing Latin script
 in the string bound for a Hindi TTS voice — is the only one here that owes the
 model nothing at all.
+
+---
+
+## Phase 3 — Synthesis with prosody
+
+**"Stage 4 is an HTTP call to a Google TTS product with a rate parameter on it.
+Google's own dubbing does that. Where is the meaningful use of Gen AI here — and
+isn't the 'preserved prosody' just a number the model made up, rendered by a
+service that would have said the words anyway?"**
+
+The second half of that question is the sharp half, and the honest answer is that
+Phase 3 spent most of its effort finding out that the answer was nearly *no*, then
+fixing it. Stage 4 itself claims no Gen AI: it is a typed request builder, and the
+generative work it renders was done in stages 1–3. What it does claim is that the
+rendering is *faithful to* those stages and *checkable* — and the first version
+was neither, which is the part worth reporting. SPEC §b left synthesis conditional
+on a spike ("SSML prosody **if** the Phase 3 spike confirms Chirp 3 HD honors it")
+because three Google pages gave three different answers. The spike ran, tested a
+predicted magnitude rather than a direction — `<break time="3s"/>` must add three
+seconds — measured +3.71 s, and concluded SSML was honoured. Stage 4 was built on
+that: every emphasis term stage 2 detected got wrapped in `<prosody rate="0.85">`.
+The result was audio **41.3% longer** than its source span. Two 350 ms breaks and
+sixteen rate wrappers cannot cost twenty-four seconds, so that number was not
+drift, it was the bug reporting itself. The control that found it was a *no-op*:
+`<prosody rate="1.0">` asks for the rate the voice already uses and must therefore
+change nothing, and it moved the duration +12.8% — as much as `rate="slow"` did.
+Two wrappers cost 1.69× one. So Chirp 3 HD parses SSML structure and ignores
+inline `<prosody>`'s rate attribute, inserting ~1.4 s of dead air at each tag
+instead; `<break>` "worked" only because inserting time is what `<break>` means,
+so for that one tag the artifact and the intent coincide. **A prediction test tells
+you a parser exists; a no-op test tells you what it parses.** The spike had the
+first and needed both, and it now ships all four controls — noise floor, bogus
+tag, predicted magnitude, no-op — so the corrected verdict is reproducible rather
+than remembered. The consequence is stated in the schema rather than buried: the
+field is `emphasisPausedTerm`, not `emphasisStressedTerm`, because what survived
+measurement is a 150 ms pause before one term per segment — the beat a teacher
+puts in front of a word they want to land — and per-term *stress* is not
+achievable on this voice at all. Terms that get nothing acoustically are listed in
+`emphasisNotRealized` and still highlighted in the panel, so the UI cannot show
+emphasis the audio never applied.
+
+**"Then what part of the pedagogical signal actually survives into audio, as
+opposed to into a JSON field?"** Three things, each traceable to a stage-1 or
+stage-2 decision and each measured on this voice: the segment's `speakingRate`
+(rate 0.85 → +17.2%, real), the `pauseBefore` that stage 1 detects ahead of
+definitions and warnings (`<break time="350ms"/>` → +0.30 s measured for 0.35 s
+requested, accurate), and one pre-term pause per segment. That is a genuinely
+smaller claim than "we reproduce the teacher's prosody", and it is the size of
+claim the measurements support. It is also worth saying what this bought that a
+literal dub does not have: the audio is *conditioned on the instructional label*
+— a segment marked `warning` is slower and preceded by silence because stage 1
+heard it as a warning, not because a fixed rule slowed every sentence.
+
+**"You also claimed in Phase 2 that the length-drift risk was solved. Was it?"**
+Yes, and Phase 3 is the first pass that can say so with a measurement instead of
+arithmetic. Phase 2 divided a character count by an assumed 13 Devanagari
+chars/sec, labelled it an estimate in four places, and committed to replacing it
+the moment real audio existed. Measured plain-text rate on
+`hi-IN-Chirp3-HD-Kore`: **12.72** chars/sec — the guess was 2% high, and
+`drift.ts` now exports `MEASURED_CHARS_PER_SEC` with a unit test pinning it to
+this file. On the fixture the adapted Hindi as plain text runs **+1.2%** against
+its source span, so the character budget in `adapt.v1.md` does the job and SPEC
+§g's assumed 15–25% overrun does not materialise. The total measured output is
+**+11.6%**, which means **+10.2% is time stage 4 adds on purpose** — eight
+emphasis pauses and two lead pauses, about 6.4 s, and the arithmetic closes.
+Separating those two required synthesizing every segment a second time as plain
+text (`--baseline`), and that control is not optional decoration: "our output is
+41% too long" and "our output is 11% too long, of which 10 points are pauses we
+chose to insert" are different claims, and only one of them is honest. The first
+version of this phase would have reported the first one.
+
+**What this phase costs and what it still cannot do.** Stage 4 is ~16 s of a
+**180.4 s** cold end-to-end run on a 63 s clip, against SPEC §g's 120 s demo
+target — so the budget miss Phase 2 confirmed is now larger, and the number is
+published rather than rounded. Synthesis calls are genuinely independent, unlike
+adapt's, so parallelizing them is the obvious Phase 4 lever; it was deliberately
+not pulled here, because changing concurrency in the same commit that first
+measures a stage makes the per-segment number unreadable. Cost is 1,372 billed
+characters for the clip, and stage 4 emits **no** `ModelCall` even though SPEC's
+enum has a `synthesize` member: Cloud TTS has no tokens, `lib/gemini.ts` already
+treats missing usage as an error rather than a zero, and three confident zeros in
+a cost panel would be worse than an absent row. Two things remain outside what
+this phase can assert. `research.md` now records that `[pause short]` markup
+produces **no measurable silence** in the leading position despite the Chirp 3 HD
+docs listing it for `hi-IN` — a doc contradiction found by measurement and
+corrected rather than worked around, per CLAUDE.md — but a duration measurement
+cannot see a tag that changes only pitch or loudness, so "no measurable effect" is
+not the same as "inert" and the file says so. And the one thing nothing in this
+repository can settle: whether the Hindi *sounds* like a teacher. `output.mp3`
+plays, the pauses land where `ttsHints` asked and ffprobe confirms it, and SPEC
+§g's last risk row — a native Hindi speaker reviewing the fixture output before
+the video is recorded — is still outstanding. It is listed as outstanding rather
+than quietly satisfied by the fact that the file exists.

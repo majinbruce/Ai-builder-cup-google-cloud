@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { ffmpegAvailable } from "../lib/ffmpeg.ts";
+import { TTS_VOICE, listVoices } from "../lib/tts.ts";
 import { GEMINI_MODEL, parseThinkingLevel } from "../lib/gemini.ts";
 import { runAdapt, runAdaptRetry, runBrief } from "../modules/localize/adapt.stage.ts";
 import { runAnalyze } from "../modules/localize/analyze.stage.ts";
@@ -11,8 +12,13 @@ import {
   runCritique,
   selectForRetry,
 } from "../modules/localize/critique.stage.ts";
+import { runSynthesize } from "../modules/localize/synthesize.stage.ts";
 import { Analysis } from "../modules/localize/localize.schemas.ts";
-import type { Adaptation, ModelCall } from "../modules/localize/localize.schemas.ts";
+import type {
+  Adaptation,
+  ModelCall,
+  Synthesis,
+} from "../modules/localize/localize.schemas.ts";
 import {
   fail,
   out,
@@ -21,7 +27,9 @@ import {
   printCalls,
   printCritiqueSummary,
   printDrift,
+  printMeasuredTiming,
   printSegmentCritique,
+  printSynthesis,
   readStageOutput,
   writeStageOutput,
 } from "./print.ts";
@@ -31,14 +39,18 @@ import {
  * The whole pipeline, end to end. The Phase 2 demo.
  * ============================================================================
  *
- *   npm run pipeline -- --no-audio            # analyze -> adapt -> critique
- *   npm run pipeline -- --no-audio --from-analysis
- *   npm run pipeline -- --no-audio --thinking=low
- *   npm run pipeline -- --no-audio path/to.mp3
+ *   npm run pipeline                          # all four stages, ending in audio
+ *   npm run pipeline -- --no-audio            # stop after critique
+ *   npm run pipeline -- --from-analysis       # reuse outputs/analysis.json
+ *   npm run pipeline -- --thinking=low
+ *   npm run pipeline -- path/to.mp3
  *
- * --no-audio stops after critique. Stage 4 (Chirp 3 HD synthesis) is Phase 3;
- * until it exists the flag is required rather than assumed, so that the day
- * synthesis lands, nobody has to notice that the default silently changed.
+ * Since Phase 3 the default is a FULL run ending in outputs/output.mp3.
+ * `--no-audio` used to be mandatory, with a hard failure explaining that stage 4
+ * did not exist and a note that the day it landed nobody should have to notice
+ * the default had silently changed. It landed; the flag is now the opt-out it was
+ * always going to become, for iterating on the text stages without paying for
+ * synthesis.
  *
  * --from-analysis reuses outputs/analysis.json instead of re-running the audio
  * call. Phase 1 measured that call at 63-70 s and ~20k thought tokens, which is
@@ -58,19 +70,14 @@ const thinking = thinkingLevel === undefined ? {} : { thinkingLevel };
 const positional = args.filter((arg) => !arg.startsWith("--"));
 const audioPath = path.resolve(positional[0] ?? "fixtures/sample_60s.mp3");
 
-if (!noAudio) {
-  fail(
-    "Stage 4 (Chirp 3 HD synthesis) is Phase 3 and does not exist yet, so a full run\n" +
-      "is not possible. Run the three stages that do:\n\n" +
-      "  npm run pipeline -- --no-audio\n"
-  );
-}
-
 const startedAt = performance.now();
 const calls: ModelCall[] = [];
 
 out();
-out("  Intent-preserving localization — analyze -> adapt -> critique");
+out(
+  "  Intent-preserving localization — " +
+    (noAudio ? "analyze -> adapt -> critique" : "analyze -> adapt -> critique -> synthesize")
+);
 out(`  model     ${GEMINI_MODEL}`);
 out(
   `  thinking  ${thinkingLevel ?? `model default, except critique at ${CRITIQUE_THINKING_LEVEL}`}`
@@ -91,7 +98,7 @@ if (fromAnalysis) {
       "npm run stage:analyze"
     ).analysis
   );
-  out(`  [1/3] analyze  SKIPPED — reusing outputs/analysis.json (--from-analysis)`);
+  out(`  [1/4] analyze  SKIPPED — reusing outputs/analysis.json (--from-analysis)`);
   out(`        ${analysis.segments.length} segments, topic: ${analysis.topic}`);
 } else {
   if (!fs.existsSync(audioPath)) {
@@ -104,7 +111,7 @@ if (fromAnalysis) {
     );
   }
 
-  out(`  [1/3] analyze  measuring acoustics and calling Gemini with the audio...`);
+  out(`  [1/4] analyze  measuring acoustics and calling Gemini with the audio...`);
 
   const result = await runAnalyze({ audioPath });
   analysis = result.analysis;
@@ -131,7 +138,7 @@ out();
 /* Stage 2 — brief, then adapt segment by segment                             */
 /* -------------------------------------------------------------------------- */
 
-out("  [2/3] adapt    writing the brief and glossary...");
+out("  [2/4] adapt    writing the brief and glossary...");
 
 const { brief, call: briefCall } = await runBrief({ analysis, ...thinking });
 calls.push(briefCall);
@@ -162,7 +169,7 @@ out();
 /* Stage 3 — critique, then the one-shot retry                                */
 /* -------------------------------------------------------------------------- */
 
-out("  [3/3] critique back-translating and scoring, blind to the reasoning...");
+out("  [3/4] critique back-translating and scoring, blind to the reasoning...");
 
 const { critique, call: critiqueCall } = await runCritique({
   analysis,
@@ -208,6 +215,43 @@ if (selected.length > 0) {
   out("        no segment failed the gate");
 }
 
+/* -------------------------------------------------------------------------- */
+/* Stage 4 — synthesize                                                       */
+/* -------------------------------------------------------------------------- */
+
+let synthesis: Synthesis | null = null;
+
+if (noAudio) {
+  out();
+  out("  [4/4] synth    SKIPPED (--no-audio)");
+} else {
+  out();
+  out("  [4/4] synth    Chirp 3 HD, one call per segment, then ffmpeg concat...");
+
+  if ((await ffmpegAvailable()) === null) {
+    fail("ffmpeg is not on PATH, so stage 4 cannot concatenate. sudo apt install ffmpeg");
+  }
+
+  // Free and read-only, and it fails before eight paid requests do.
+  const voices = await listVoices();
+  if (!voices.includes(TTS_VOICE)) {
+    fail(`Voice ${TTS_VOICE} is not among the ${voices.length} hi-IN voices available.`);
+  }
+
+  const result = await runSynthesize({
+    analysis,
+    adaptation,
+    outDir: "outputs",
+    onSegment: (segment, index, total) => {
+      process.stdout.write(`\r        ${index + 1}/${total} ${segment.id}          `);
+    },
+  });
+
+  synthesis = result.synthesis;
+  out(`\r        ${synthesis.segments.length} segments synthesized      `);
+  out(`        ${synthesis.durationSec.toFixed(1)}s of Hindi audio, ${synthesis.billedChars} billed chars`);
+}
+
 const wallClockSec = (performance.now() - startedAt) / 1000;
 
 /* -------------------------------------------------------------------------- */
@@ -251,6 +295,11 @@ out(
 );
 out();
 
+if (synthesis !== null) {
+  printSynthesis(synthesis);
+  printMeasuredTiming(analysis, adaptation, synthesis);
+}
+
 printCalls(calls);
 
 out(`  WALL CLOCK, end to end: ${wallClockSec.toFixed(1)}s`);
@@ -266,11 +315,13 @@ writeStageOutput("adaptation.json", {
   retriedIds,
 });
 writeStageOutput("critique.json", { critique, retriedIds, calls: [critiqueCall] });
+if (synthesis !== null) writeStageOutput("synthesis.json", { synthesis });
 const jobPath = writeStageOutput("job.json", {
   targetLanguage: adaptation.targetLanguage,
   analysis,
   adaptation,
   critique,
+  ...(synthesis === null ? {} : { synthesis }),
   retriedIds,
   calls,
 });

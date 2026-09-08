@@ -254,13 +254,34 @@ export const Critique = z.object({
 
 ### Stage 4 — Synthesize (Cloud Text-to-Speech, Chirp 3 HD, `hi-IN`)
 
-Per segment, one `synthesizeSpeech` call with `speaking_rate = ttsHints.speakingRate`,
-`[pause short|long]` markup prepended when `pauseBefore != none`, and emphasis
-via SSML `<prosody>`/`<emphasis>` **if** the Phase 3 spike confirms Chirp 3 HD
-honors them; otherwise emphasis is realized through a slightly slower rate on
-the emphasized clause and a short pause after it (both confirmed supported).
-Fallback voice with full SSML: `hi-IN-Neural2-*`. Segments are concatenated with
-ffmpeg and stored as `jobs/<jobId>/output.mp3`.
+Per segment, one `synthesizeSpeech` call. **The conditional in this section is
+now resolved by measurement (2026-09-08) and resolved to the fallback** — see
+`docs/research.md` § Phase 3 spike for the table.
+
+- `speaking_rate = ttsHints.speakingRate` on `audioConfig`. Confirmed: rate 0.85
+  lengthens the audio 17.2%.
+- `pauseBefore` becomes SSML `<break time="350ms|700ms"/>` at the start of the
+  utterance. Confirmed accurate (+0.30 s measured for 0.35 s requested). **Not**
+  `[pause short|long]` markup, which the docs list for `hi-IN` and which the
+  spike measured producing no silence at all in the leading position.
+- Emphasis is **not** realized with SSML `<prosody>`/`<emphasis>`. Chirp 3 HD
+  accepts them and ignores their rate attribute: `<prosody rate="1.0">`, a
+  semantic no-op, changed the duration as much as `rate="slow"`, and each inline
+  tag inserts ~1.4 s of dead time at its own position. A build that wrapped every
+  stressed term made the fixture 41% longer while stressing nothing.
+- What emphasis IS: a `<break time="150ms"/>` before **one** term per segment —
+  the pause a teacher puts in front of a word they want to land. It is named
+  `emphasisPausedTerm` in the schema because it is a pause and not stress.
+  Per-term stress is not achievable on this voice, and the artifact says so per
+  segment via `emphasisNotRealized`.
+
+Audio comes back as LINEAR16, not MP3: per-segment MP3s inherit encoder padding
+at every concat boundary, which would corrupt the duration measurements this
+stage exists to produce. Segments are joined with ffmpeg's concat demuxer
+(`-c copy`, lossless — measured within 0.11 s of the sum of its parts) and
+encoded once to 16 kHz mono MP3, the same format ingest normalizes to, stored as
+`jobs/<jobId>/output.mp3`. Full-SSML fallback voice if ever needed:
+`hi-IN-Neural2-*`.
 
 ```ts
 export const SynthesizedSegment = z.object({
@@ -270,11 +291,26 @@ export const SynthesizedSegment = z.object({
   voice: z.string(),
   speakingRate: z.number(),
   markupUsed: z.string(),                 // exact text/SSML sent, for the audit panel
+  inputMode: z.enum(["text", "markup", "ssml"]),
+  // Amended 2026-09-08, Phase 3. ffprobe'd from the returned audio, never
+  // estimated: this field is what retires drift.ts's assumed chars/sec.
+  measuredDurationSec: z.number().positive(),
+  // Cloud TTS bills per REQUEST character, tags included. Stage 4 has no tokens,
+  // so it emits no ModelCall — see the note on the ModelCall enum below.
+  billedChars: z.number().int().nonnegative(),
+  latencyMs: z.number().int().nonnegative(),
+  pauseBeforeMs: z.number().int().nonnegative(),
+  emphasisPausedTerm: z.string().nullable(),   // a pause, not stress
+  emphasisNotRealized: z.array(z.string()),    // shown in the UI, silent in the audio
+  emphasisNotFound: z.array(z.string()),       // claimed but absent from its own Hindi
 });
 export const Synthesis = z.object({
   audioUri: z.string(),
   durationSec: z.number().positive(),
+  voice: z.string(),
   segments: z.array(SynthesizedSegment),
+  billedChars: z.number().int().nonnegative(),
+  measuredCharsPerSec: z.number().positive(),
 });
 ```
 

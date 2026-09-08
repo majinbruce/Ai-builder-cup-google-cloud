@@ -20,20 +20,28 @@ import type { AnalyzedSegment, AdaptedSegment } from "./localize.schemas.ts";
 /**
  * Devanagari characters per second of speech at Chirp 3 HD `speaking_rate` 1.0.
  *
- * THIS IS AN ESTIMATE, and it is labelled as one everywhere it surfaces. It
- * comes from arithmetic, not from measurement: conversational Hindi runs about
- * 5-6 syllables per second, and a Devanagari syllable averages a little over
- * two code points once matras and the occasional conjunct virama are counted.
- * That puts a reasonable clip somewhere around 13 characters per second.
+ * MEASURED 2026-09-08, Phase 3, and no longer an estimate. `npm run
+ * stage:synthesize -- --baseline` synthesizes every adapted segment as plain
+ * text at rate 1.0 and divides the spoken character count by the ffprobe'd
+ * duration: 12.72 chars/sec across the eight fixture segments on
+ * hi-IN-Chirp3-HD-Kore.
  *
- * The honest number can only come from Phase 3, which synthesizes real audio
- * and can divide its measured duration by the character count that produced it.
- * Until then this constant is good enough to keep a segment from running to
- * double the length of its source, and not good enough to be quoted as a
- * finding — which is why every function below returns "estimated" in its name
- * or its field, and why the CLI prints the word next to the number.
+ * The number this replaced was 13, reached by arithmetic (about 5-6 Hindi
+ * syllables per second, a little over two code points per syllable) and
+ * labelled an estimate in the schema comment, the CLI, docs/research.md and
+ * docs/JUDGE_NOTES.md, with a commitment to measure it the moment real audio
+ * existed. The guess was 2% high. That is worth stating plainly in both
+ * directions: the estimate deserved its caveats, AND it turned out to be good,
+ * so Phase 2's conclusion that the length-drift risk was manageable by asking
+ * for a budget rather than by post-hoc rate-fitting survives measurement.
+ *
+ * It stays a constant because a budget is written BEFORE any audio exists —
+ * adapt.v1.md needs a number at prompt time. It is deliberately the PLAIN rate,
+ * with no pauses and no rate changes: those are stage 4's deliberate additions
+ * and folding them in here would budget the adapter for time the synthesizer
+ * spends on purpose. A voice change invalidates it; re-run the baseline.
  */
-export const ESTIMATED_CHARS_PER_SEC = 13;
+export const MEASURED_CHARS_PER_SEC = 12.72;
 
 /**
  * How far over budget a segment may run before it is worth mentioning.
@@ -56,7 +64,7 @@ export function charBudget(
   segment: Pick<AnalyzedSegment, "startSec" | "endSec">
 ): number {
   const spanSec = Math.max(0, segment.endSec - segment.startSec);
-  return Math.round((spanSec * ESTIMATED_CHARS_PER_SEC) / 5) * 5;
+  return Math.round((spanSec * MEASURED_CHARS_PER_SEC) / 5) * 5;
 }
 
 /** One segment's estimated timing against the span it has to fill. */
@@ -65,7 +73,7 @@ export interface SegmentDrift {
   sourceSec: number;
   chars: number;
   budgetChars: number;
-  /** chars / ESTIMATED_CHARS_PER_SEC — an estimate, never a measurement. */
+  /** chars / MEASURED_CHARS_PER_SEC — a projection from a measured rate. */
   estimatedTargetSec: number;
   /** (estimated - source) / source. Positive means the Hindi runs long. */
   ratio: number;
@@ -102,7 +110,7 @@ export function measureDrift(
 
     const sourceSec = Math.max(0, sourceSegment.endSec - sourceSegment.startSec);
     const chars = countSpokenChars(match.targetText);
-    const estimatedTargetSec = chars / ESTIMATED_CHARS_PER_SEC;
+    const estimatedTargetSec = chars / MEASURED_CHARS_PER_SEC;
     const ratio = sourceSec === 0 ? 0 : (estimatedTargetSec - sourceSec) / sourceSec;
 
     segments.push({

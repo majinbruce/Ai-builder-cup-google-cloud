@@ -39,6 +39,11 @@ export const ModelCallStage = z.enum([
   "adapt",
   "critique",
   "adapt_retry",
+  // Present because docs/SPEC.md section b lists it, and deliberately NEVER
+  // emitted. Stage 4 is Cloud Text-to-Speech: no tokens, no thinking. A
+  // ModelCall for it would carry three zeros, and lib/gemini.ts already
+  // establishes that missing usage is an error rather than a zero. Synthesis
+  // cost lives on Synthesis.billedChars, the unit Google actually bills.
   "synthesize",
 ]);
 
@@ -430,6 +435,124 @@ export const Critique = z.object({
   overallNaturalness: z.number().int().min(0).max(100),
   segments: z.array(SegmentCritique).min(1),
 });
+
+/**
+ * ============================================================================
+ * Stage 4 — Synthesize
+ * ============================================================================
+ *
+ * docs/SPEC.md section b, plus three fields the spec did not have. This is the
+ * first stage whose output is not text, and the first that costs money per
+ * character rather than per token.
+ *
+ * What the Phase 3 spike settled, because these schemas encode the answer:
+ * Chirp 3 HD on hi-IN DOES honour SSML. SPEC section b left that conditional
+ * ("+ SSML prosody if the Phase 3 spike confirms Chirp 3 HD honors it") because
+ * three Google pages gave three different answers. The spike tested a predicted
+ * magnitude rather than a direction — `<break time="3s"/>` must add three
+ * seconds, and measured +3.59 s against a 9.7% noise floor — and tested scope,
+ * finding whole-sentence `<prosody>` 1.87x the two-word version, while a
+ * meaningless `<zzz>` stayed inert. So `markupUsed` below holds SSML and the
+ * conditional resolved to its primary branch. docs/research.md has the table.
+ */
+
+/**
+ * One synthesized span, with everything needed to explain how it was said.
+ *
+ * `markupUsed` is why this schema exists rather than the stage just returning a
+ * file. The reasoning panel (SPEC section d, item 6) claims to show the exact
+ * settings applied to each segment, and a claim about a request is only
+ * checkable if the request itself is in the artifact. It is stored verbatim,
+ * tags included, so a reader can replay it and get the same audio back.
+ */
+export const SynthesizedSegment = z.object({
+  id: z.string(),
+  startSec: z.number().nonnegative(),
+  endSec: z.number().positive(),
+  voice: z.string(),
+  speakingRate: z.number(),
+  /** The exact string sent to Cloud TTS, tags and all. */
+  markupUsed: z.string(),
+  /** Which `input` oneof carried it — "ssml" unless the spike verdict changes. */
+  inputMode: z.enum(["text", "markup", "ssml"]),
+  /**
+   * Measured by ffprobe on the returned audio, never estimated.
+   *
+   * This field is why Phase 3 can retire the estimate in drift.ts.
+   * MEASURED_CHARS_PER_SEC was arithmetic — a character count divided by an
+   * assumed constant — and docs/JUDGE_NOTES.md committed to replacing it with a
+   * measured value the moment real audio existed. Real audio is this.
+   */
+  measuredDurationSec: z.number().positive(),
+  /**
+   * Cloud TTS bills per character of the REQUEST, tags included, not per
+   * character of speech. Recorded because SPEC section e sells per-call
+   * telemetry as evidence that the visible reasoning is worth its cost, and a
+   * pipeline that stops counting at the last stage is not making that case.
+   */
+  billedChars: z.number().int().nonnegative(),
+  latencyMs: z.number().int().nonnegative(),
+  /**
+   * Emphasis terms the adapter asked for that do NOT occur in its own
+   * targetText, so nothing could be wrapped.
+   *
+   * Reported rather than dropped. An `emphasisTerms` entry absent from the Hindi
+   * it belongs to is the adapter making a claim about a string it did not write,
+   * and this pipeline's house style is to print that rather than let the audit
+   * panel show emphasis that was never applied.
+   */
+  emphasisNotFound: z.array(z.string()),
+  /**
+   * The one term given a pause before it, or null if the segment had none.
+   *
+   * Named for what it IS — a pause — and not for what it is hoped to signal.
+   * Per-term stress is not achievable on Chirp 3 HD hi-IN: the Phase 3 spike
+   * showed inline `<prosody rate="1.0">`, a semantic no-op, changing the audio as
+   * much as `rate="slow"`, which means the rate attribute is ignored and each
+   * inline tag merely inserts time. A pause before a term is a genuine teacherly
+   * device and is all that survived measurement, so it is what the field says.
+   */
+  emphasisPausedTerm: z.string().nullable(),
+  /**
+   * The segment's LEADING pause in milliseconds, as requested.
+   *
+   * A field rather than something the UI greps out of `markupUsed`. The panel
+   * needs to tell a lead pause from the emphasis pause, and those are the same
+   * tag — a segment whose first emphasis term opens the sentence produces a
+   * `<break>` in the leading position that means something entirely different.
+   * Recovering intent from a rendered string is how a display starts lying.
+   */
+  pauseBeforeMs: z.number().int().nonnegative(),
+  /**
+   * Emphasis terms present in the Hindi that received no acoustic treatment.
+   *
+   * They are still highlighted in the reasoning panel, so this is not discarding
+   * them — but the audio does nothing for them. A panel that claims to show what
+   * was applied has to be able to show what was not.
+   */
+  emphasisNotRealized: z.array(z.string()),
+});
+
+export const Synthesis = z.object({
+  audioUri: z.string(),
+  durationSec: z.number().positive(),
+  voice: z.string(),
+  segments: z.array(SynthesizedSegment).min(1),
+  /** Whole-job billable characters — the stage's cost, in Google's own unit. */
+  billedChars: z.number().int().nonnegative(),
+  /**
+   * Measured Devanagari characters per second of synthesized speech.
+   *
+   * The honest replacement for drift.ts's MEASURED_CHARS_PER_SEC. Computed as
+   * spoken characters over measured duration across every segment of this run,
+   * so it is a property of this voice at these rates, reported per run rather
+   * than frozen into a constant that a voice change would silently falsify.
+   */
+  measuredCharsPerSec: z.number().positive(),
+});
+
+export type SynthesizedSegment = z.infer<typeof SynthesizedSegment>;
+export type Synthesis = z.infer<typeof Synthesis>;
 
 export type ChoiceKind = z.infer<typeof ChoiceKind>;
 export type AdaptationChoice = z.infer<typeof AdaptationChoice>;

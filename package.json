@@ -34,7 +34,8 @@
     "stage:adapt": "node src/scripts/stage-adapt.ts",
     "stage:critique": "node src/scripts/stage-critique.ts",
     "stage:synthesize": "node src/scripts/stage-synthesize.ts",
-    "pipeline": "node src/scripts/pipeline.ts"
+    "pipeline": "node src/scripts/pipeline.ts",
+    "spike:tts": "node src/scripts/spike-tts.ts"
   },
   "dependencies": {
     "@fastify/compress": "^9.2.0",

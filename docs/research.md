@@ -94,9 +94,9 @@ two reporting bugs the first live run exposed that no synthetic test could.
 |---|---|---|
 | Voice family | Chirp 3 HD, GA. Name pattern `<locale>-Chirp3-HD-<Voice>`, e.g. `hi-IN-Chirp3-HD-Kore`. 30 voice names (Aoede, Charon, Kore, Puck, Zephyr, …). `hi-IN` supported. | https://docs.cloud.google.com/text-to-speech/docs/chirp3-hd |
 | Pace | `speaking_rate` 0.25–2.0. | same |
-| Pauses | `markup` input with `[pause short]`, `[pause long]`, `[pause]`; available for `hi-IN`. | same |
+| Pauses — **DOC IS WRONG for the leading position** | Docs: `markup` input with `[pause short]`, `[pause long]`, `[pause]`; "available for `hi-IN`". **Measured 2026-09-08 (Phase 3 spike): `[pause short]` at the START of an utterance produces NO measurable silence — −2.8%, inside the noise floor.** Inline it does something (+0.63 s in a probe). Use SSML `<break time>` instead, which is accurate in both positions. | https://docs.cloud.google.com/text-to-speech/docs/chirp3-hd |
 | Custom pronunciation | IPA / X-SAMPA via `custom_pronunciations`; available for `hi-IN`. | same |
-| **SSML — CONFLICT** | Release note 2025-10-17: Chirp 3 HD SSML supports only `<phoneme>`, `<p>`, `<s>`, `<sub>`, `<say-as>`. Current Chirp 3 HD page lists `<prosody>`, `<break>`, `<voice>`, `<audio>` too. Voice-list page says Chirp 3 HD "doesn't support SSML input". **Resolve empirically in Phase 3 spike.** | https://docs.cloud.google.com/text-to-speech/docs/release-notes, https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types |
+| **SSML — RESOLVED 2026-09-08, and no page was right** | The three conflicting claims were: release note 2025-10-17 (only `<phoneme>`, `<p>`, `<s>`, `<sub>`, `<say-as>`), the Chirp 3 HD page (also `<prosody>`, `<break>`, `<voice>`, `<audio>`), and the voice-list page ("doesn't support SSML input"). **The measured answer: Chirp 3 HD on `hi-IN` ACCEPTS ssml input and parses its STRUCTURE, honours `<break time>` accurately, and IGNORES inline `<prosody>`'s rate attribute — inserting ~1.4 s of dead time per inline tag instead.** So the voice-list page is wrong (ssml is accepted), the Chirp 3 HD page is misleading (`<prosody>` is accepted and does not do what it says), and the release note is closest but still incomplete (`<break>` works and is not on its list). Full table below. | measured; see § Phase 3 spike |
 | Full-SSML fallback | Neural2 / WaveNet voices support `<prosody rate|pitch|volume>`, `<emphasis level>`, `<break>`. Hindi Neural2 voices exist under `hi-IN`. | https://docs.cloud.google.com/text-to-speech/docs/ssml |
 | Node SDK | `@google-cloud/text-to-speech` 7.0.0. Auth via ADC / service account. | npm |
 
@@ -119,6 +119,92 @@ recorded earlier in this file, the measurement wins.
 | Devanagari-only compliance | **0 of 8 segments** contained Latin script across every run. The rule in `adapt.v1.md` is being followed, and `findLatinRuns()` enforces it after the parse (not as a schema regex — a regex would discard a paid call for one stray word instead of routing that segment through the retry that already exists). |
 | Blind critique — does it actually catch anything? | Yes, and this is the evidence that it is not decorative. On a run with the threshold temporarily raised to 85 to exercise the path, the critic flagged s04 at naturalness 78 and quoted the exact substring `"इस बात की कहीं ज़्यादा भरपाई कर सकता है कि"` as a calque of the English "make up for the fact that". The retry restructured it into a फ़ायदा/नुक़सान contrast — `"और यह फ़ायदा इस रास्ते के सीधी रेखा से काफ़ी लंबे होने के नुक़सान की कहीं ज़्यादा भरपाई कर देता है।"` — fixing precisely what was quoted and leaving the rest alone. Reproduced across two independent critique runs (default and `low` thinking), which both flagged s04 and both quoted the same substring. |
 | Retry rate at the real threshold | **0 of 8 segments** fall below 70 on the fixture (fidelity 92-96, naturalness 82-95). The gate is real but does not fire on good input, which is the correct behaviour and also means the retry path needs a deliberately raised threshold to demonstrate. Do not read a 0% retry rate as the loop being untested — read `test/adapt.test.ts` and the run above. |
+
+## Phase 3 spike — what Chirp 3 HD actually honours, measured 2026-09-08
+
+`npm run spike:tts`. Every variant runs 3 times on one real sentence from
+`outputs/adaptation.json` (184 chars, ~11 s), voice `hi-IN-Chirp3-HD-Kore`.
+Raw data in `outputs/spike/spike-results.json`.
+
+**Read the noise floor first.** Chirp 3 HD is generative and its output duration
+is not reproducible: re-sending byte-identical input moved the duration by up to
+**6.8%** within a single run (and 4.4% between runs, which is how this was
+noticed). Every threshold below is derived from that measured spread rather than
+chosen in advance, and nothing under it is treated as a finding. A single-shot
+A/B on this API measures noise as confidently as it measures signal.
+
+| Mechanism | Measured | Verdict |
+|---|---|---|
+| `<speak>` wrapper, no tags | +0.0% vs plain text | inert, as it should be |
+| `audioConfig.speaking_rate` 0.85 | **+17.2%** | **works.** The segment-rate mechanism the stage uses |
+| `<break time="3s"/>` | **+3.71 s** for 3.0 s requested | **works.** Predicted magnitude, hit |
+| `<break time="350ms"/>` leading | **+0.30 s** for 0.35 s requested | **works.** The `pauseBefore` mechanism the stage uses |
+| `<break time="150ms"/>` inline | +0.74 s | works, with ~0.6 s of boundary overhead beyond the request |
+| `<prosody rate="1.0">` inline — **a semantic NO-OP** | **+12.8%** | **BROKEN. This is the decisive row.** A tag asking for the rate the voice already uses must change nothing |
+| `<prosody rate="slow">` inline | +15.3% | indistinguishable from the no-op → the rate attribute is not read |
+| TWO `<prosody>` wrappers vs one | 1.69x the effect | cost scales with tag COUNT, not with what the tags say |
+| `<prosody rate="slow">` whole utterance | +34.8% (2.27x the two-word version) | consistent with a real global rate, but `speaking_rate` does this properly |
+| `<emphasis level="strong">` inline | +14.2% | same magnitude as the no-op → same artifact |
+| `<zzz>` (meaningless tag) | −5.0%, inside noise | unknown tags are stripped, not vocalized |
+| `[pause short]` leading markup | −2.8%, inside noise | **produces no silence.** Contradicts the doc row above |
+
+### How this spike got it wrong twice before getting it right
+
+Recorded because the method matters more than the result, and because the wrong
+answer shipped into `synthesize.stage.ts` before the right one did.
+
+1. **Run 1 (one trial per variant):** every variant "changed the audio". No noise
+   floor existed, so a 4.4% generative wobble and a real effect were the same
+   observation. Fixed by running 3 trials and deriving the threshold from the
+   same-input spread.
+2. **Run 2 (3 trials, prediction test added):** `<break time="3s"/>` hit its
+   predicted +3.6 s and the bogus `<zzz>` stayed inert, so the verdict was "SSML
+   is genuinely honoured". Both observations were correct; the conclusion was
+   not. Neither test distinguishes *the tag's meaning was applied* from *the
+   presence of a tag changed the audio*. Stage 4 was built on that verdict,
+   wrapped all 16 emphasis terms in `<prosody rate="0.85">`, and produced audio
+   **41.3% longer** than the source span. Two 350 ms breaks and sixteen rate
+   wrappers cannot cost 24 s, so the number was not drift — it was the bug
+   reporting itself.
+3. **Run 3 (no-op control added):** `<prosody rate="1.0">` moved the duration
+   +12.8%. A rate tag that does something when it asks for nothing is not being
+   honoured. Verdict reversed; `<prosody>` removed from the stage.
+
+**The transferable lesson: a prediction test tells you a parser exists, a no-op
+test tells you what it parses.** This spike had only the first and needed both.
+`spike-tts.ts` now ships all four controls — noise floor, bogus tag, predicted
+magnitude, and no-op — so the corrected verdict is reproducible rather than
+remembered.
+
+### Consequence for the pipeline
+
+Per-term acoustic **stress** is not achievable on Chirp 3 HD `hi-IN`. SPEC §b's
+conditional therefore resolves to its fallback branch, reached on evidence rather
+than on the documentation conflict. What stage 4 uses, every element measured:
+
+- segment rate ← `audioConfig.speaking_rate` from `ttsHints.speakingRate`
+- `pauseBefore` ← `<break time="350|700ms"/>` at the utterance start
+- emphasis ← a `<break time="150ms"/>` before **one** term per segment. This is a
+  *pause*, which is a real teacherly device, and the schema field is named
+  `emphasisPausedTerm` rather than anything implying stress. Remaining terms are
+  highlighted in the UI and carry `emphasisNotRealized` in the artifact.
+
+One term, not all of them, for a reason that is not cost: a speaker has one
+prosodic peak per breath group, and 16 pauses is a stutter, not emphasis.
+
+## Phase 3 — synthesis measured 2026-09-08
+
+Real runs on the 8-segment fixture adaptation, `hi-IN-Chirp3-HD-Kore`.
+
+| Item | Measured value |
+|---|---|
+| Per-segment TTS latency | 1.4–2.6 s per call, 135–220 billed chars each. No thinking, no tokens — Cloud TTS bills characters |
+| Stage 4 wall clock | ~16 s for 8 sequential calls + ffmpeg concat + mp3 encode. Sequential deliberately: these calls ARE independent (unlike adapt) and parallelizing them is the obvious Phase 4 lever, but changing concurrency in the same commit that first measures the stage would make the per-segment number unreadable |
+| Stage 4 cost | **1,356 billed characters** for the whole clip. At Chirp 3 HD pricing this is a fraction of a cent; recorded because SPEC §e sells per-call telemetry and a pipeline that stops counting at the last stage is not making that case |
+| Concat is lossless | `output.mp3` is within **0.11 s** of the summed segment durations. The concat demuxer with `-c copy` on LINEAR16 WAV, then one mp3 encode. Per-segment MP3s would have inherited encoder padding at every join and broken exactly the measurement this phase exists to produce |
+| **`ESTIMATED_CHARS_PER_SEC` retired** | Phase 2's arithmetic guess was **13**; measured plain-text rate on this voice is **12.72** chars/sec — **2% high**. `drift.ts` now exports `MEASURED_CHARS_PER_SEC = 12.72` and a unit test pins it to the docs. Phase 2's caveats were right to exist and its conclusion survives measurement |
+| **Length drift — SPEC §g risk now MEASURED, not estimated** | Source span 62.6 s. The adapted Hindi as plain text at rate 1.0: **63.4 s, +1.2%** — so the character budget in `adapt.v1.md` works and the risk row's assumed 15–25% overrun does not materialise. With stage 4's pedagogical prosody applied: **69.8 s, +11.6%**, i.e. **+10.2% is time this stage adds on purpose** (8 emphasis pauses + 2 lead pauses ≈ 6.4 s, which closes the arithmetic). Measured with `--baseline`, which synthesizes every segment a second time as plain text purely to separate the two causes |
+| Why the decomposition is not optional | "Our output is 41% too long" and "our output is 11% too long, of which 10 points are pauses we chose to insert" are different claims and only one is honest. The `--baseline` control exists so the stage cannot take credit for the adapter's budget or blame the adapter for its own pauses |
 
 ## Cloud Run
 
