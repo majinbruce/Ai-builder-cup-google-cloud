@@ -47,6 +47,26 @@ const CRITIQUE_PROMPT = "critique.v1";
 export const RETRY_THRESHOLD = 70;
 
 /**
+ * Critique thinks at `low` unless a caller says otherwise. DECIDED 2026-09-08.
+ *
+ * Not a taste call — docs/research.md § Thinking has the numbers. At `low` this
+ * stage spends **exactly 0** thought tokens (not merely fewer) and takes 7.7 s
+ * instead of 14.9 s on the fixture, and the comparison was made on the artifact
+ * rather than on the clock, per Phase 1's finding that its fastest analyze run
+ * was also its worst: across the 8 fixture segments the two runs agree within 3
+ * points on every score, both flag s04 as the weakest, and both quote the *same*
+ * translationese substring as the reason.
+ *
+ * The principle behind the number, which is what generalizes: a stage whose job
+ * is to compare two texts against a *published* rubric does not need to think —
+ * the judgment is in critique.v1.md, not in the decoder. Adapt and analyze,
+ * whose job is judgment the prompt cannot pre-compute, stay at the model's
+ * default. This is the SPEC section g latency lever, pulled on the one stage
+ * where it has been shown to cost nothing.
+ */
+export const CRITIQUE_THINKING_LEVEL: ThinkingLevel = "low";
+
+/**
  * One source/target pair as the critic sees it.
  *
  * This interface IS the blindness guarantee. Adding a field here is the only
@@ -130,7 +150,12 @@ export function buildCritiqueInput(
  * definition is wrong should not average out to fine.
  */
 export async function runCritique(input: CritiqueInput): Promise<CritiqueOutput> {
-  const { analysis, adaptation, logger, thinkingLevel } = input;
+  const { analysis, adaptation, logger } = input;
+
+  // Defaulted, not spread-if-present like every other stage: leaving this one
+  // undefined means the model's default, and that is the 14.9 s / 2,509-thought
+  // behaviour the measurement above rejected. An explicit override still wins.
+  const thinkingLevel = input.thinkingLevel ?? CRITIQUE_THINKING_LEVEL;
 
   const pairs = buildCritiqueInput(analysis, adaptation);
 
@@ -139,7 +164,7 @@ export async function runCritique(input: CritiqueInput): Promise<CritiqueOutput>
     prompt: loadPrompt(CRITIQUE_PROMPT),
     parts: [{ type: "text", text: formatPairsForCritique(pairs) }],
     stage: "critique",
-    ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+    thinkingLevel,
     ...(logger === undefined ? {} : { logger }),
   });
 

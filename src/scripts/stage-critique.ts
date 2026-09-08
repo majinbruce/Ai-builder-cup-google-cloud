@@ -1,8 +1,9 @@
 import process from "node:process";
-import { GEMINI_MODEL, type ThinkingLevel } from "../lib/gemini.ts";
+import { GEMINI_MODEL, parseThinkingLevel } from "../lib/gemini.ts";
 import { runAdaptRetry } from "../modules/localize/adapt.stage.ts";
 import {
   buildCritiqueInput,
+  CRITIQUE_THINKING_LEVEL,
   formatPairsForCritique,
   runCritique,
   selectForRetry,
@@ -44,19 +45,31 @@ const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
 const noRetry = args.includes("--no-retry");
 
-const thinkingArg = args.find((arg) => arg.startsWith("--thinking="));
-const thinkingLevel =
-  thinkingArg === undefined ? undefined : (thinkingArg.split("=")[1] as ThinkingLevel);
+const thinkingLevel = parseThinkingLevel(args);
 
 const analysis = Analysis.parse(
   readStageOutput<{ analysis: unknown }>("outputs/analysis.json", "npm run stage:analyze")
     .analysis
 );
-const adaptationFile = readStageOutput<{ adaptation: unknown; calls?: ModelCall[] }>(
-  "outputs/adaptation.json",
-  "npm run stage:adapt"
-);
+const adaptationFile = readStageOutput<{
+  adaptation: unknown;
+  calls?: ModelCall[];
+  retriedIds?: string[];
+}>("outputs/adaptation.json", "npm run stage:adapt");
 const adaptation = Adaptation.parse(adaptationFile.adaptation);
+
+/**
+ * Segments a PREVIOUS run of this script already sent back through Adapt.
+ *
+ * This is what makes the bound in SPEC section b survive a second invocation.
+ * `selectForRetry` takes an `alreadyRetried` argument for exactly this, but the
+ * ids only reach it if they are read back off disk: run `npm run stage:critique`
+ * twice and, without this, a segment that fails twice is re-adapted twice, which
+ * is a loop with extra steps and precisely the thing "exactly once" rules out.
+ * The pipeline never hit it because it critiques once per process; this script
+ * is the one place the bound is breakable, so it is the one place it is enforced.
+ */
+const alreadyRetried = adaptationFile.retriedIds ?? [];
 
 // Stage 2's own calls, carried forward. Rewriting adaptation.json with only this
 // stage's calls would erase the cost of producing the very text the file
@@ -67,7 +80,10 @@ const adaptCalls = adaptationFile.calls ?? [];
 out();
 out("  Stage 3 — critique");
 out(`  model     ${GEMINI_MODEL}`);
-out(`  thinking  ${thinkingLevel ?? "default"}`);
+out(
+  `  thinking  ${thinkingLevel ?? CRITIQUE_THINKING_LEVEL}` +
+    `${thinkingLevel === undefined ? " (this stage's measured default)" : " (--thinking)"}`
+);
 out(`  segments  ${adaptation.segments.length}`);
 out();
 
@@ -105,13 +121,23 @@ for (const scored of critique.segments) {
 
 printCritiqueSummary(critique);
 
-const selected = selectForRetry(critique, adaptation);
+const selected = selectForRetry(critique, adaptation, alreadyRetried);
 const calls = [critiqueCall];
 let finalAdaptation = adaptation;
-let retriedIds: string[] = [];
+let retryCalls: ModelCall[] = [];
+let retriedIds: string[] = [...alreadyRetried];
 
 out("  --- retry gate ---");
 out();
+
+if (alreadyRetried.length > 0) {
+  out(
+    `  ${alreadyRetried.length} segment(s) were already re-adapted by an earlier run ` +
+      `(${alreadyRetried.join(", ")}) and are held out of the gate.`
+  );
+  out("  SPEC section b: failing segments go back through Adapt exactly once.");
+  out();
+}
 
 if (selected.length === 0) {
   out("  No segment failed the gate. Nothing is re-adapted.");
@@ -133,17 +159,22 @@ if (selected.length === 0) {
     analysis,
     adaptation,
     critiques: selected.map((entry) => entry.critique),
+    ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
   });
 
   finalAdaptation = retry.adaptation;
-  retriedIds = retry.retriedIds;
-  calls.push(...retry.calls);
+  retryCalls = retry.calls;
+  // Appended, not replaced. This list is what a LATER run reads back to hold
+  // these segments out of its own gate, so it has to carry every id ever
+  // retried for this adaptation — not just the ones this invocation touched.
+  retriedIds = [...alreadyRetried, ...retry.retriedIds];
+  calls.push(...retryCalls);
 
   out("  --- regenerated ---");
   out();
 
   const sourceById = new Map(analysis.segments.map((segment) => [segment.id, segment]));
-  for (const id of retriedIds) {
+  for (const id of retry.retriedIds) {
     const before = adaptation.segments.find((segment) => segment.id === id);
     const after = finalAdaptation.segments.find((segment) => segment.id === id);
     if (before === undefined || after === undefined) continue;
@@ -171,10 +202,14 @@ const critiquePath = writeStageOutput("critique.json", {
   calls,
 });
 
-if (retriedIds.length > 0) {
+if (retryCalls.length > 0) {
   const adaptationPath = writeStageOutput("adaptation.json", {
     adaptation: finalAdaptation,
-    calls: [...adaptCalls, ...calls],
+    // Stage 2's calls plus the retry's, and NOT the critique call. The critique
+    // is already recorded in critique.json above, and a reader summing the two
+    // files to get a job's cost would otherwise count it twice. Each artifact
+    // lists the calls that produced the text IT contains.
+    calls: [...adaptCalls, ...retryCalls],
     retriedIds,
   });
   out(`  written -> ${adaptationPath} (regenerated segments substituted in)`);

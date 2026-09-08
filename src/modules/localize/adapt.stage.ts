@@ -70,7 +70,10 @@ export async function runBrief(input: BriefInput): Promise<BriefOutput> {
     schema: AdaptationBrief,
     prompt: loadPrompt(BRIEF_PROMPT),
     parts: [{ type: "text", text: formatAnalysisForBrief(analysis) }],
-    stage: "adapt",
+    // Its own stage, not "adapt". One call over the whole clip is a different
+    // animal from one call per segment, and SPEC section d's per-segment cost
+    // footer would otherwise bill a whole-clip call to one arbitrary segment.
+    stage: "brief",
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
     ...(logger === undefined ? {} : { logger }),
   });

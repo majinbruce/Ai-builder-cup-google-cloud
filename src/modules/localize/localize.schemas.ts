@@ -22,10 +22,20 @@ import { z } from "zod";
  * lives in the same enum so that the telemetry path the real stages use is the
  * one exercised from the very first call, rather than a parallel code path that
  * is only proven later.
+ *
+ * `brief` is stage 2a and was added on 2026-09-08 (docs/SPEC.md section b
+ * amended in the same edit). It reported as `adapt` at first, which made the
+ * two indistinguishable in telemetry — and they are not the same thing. The
+ * brief is one call over the whole clip; adapt is one call per segment. Pooling
+ * them meant docs/research.md had to separate the brief's 1,668 in / 1,695
+ * thinking / 13.6 s by hand, and it would have made SPEC section d's per-segment
+ * cost footer attribute a whole-clip call to whichever segment happened to sort
+ * first. A stage that has to be un-pooled by hand to be read is not telemetry.
  */
 export const ModelCallStage = z.enum([
   "smoke",
   "analyze",
+  "brief",
   "adapt",
   "critique",
   "adapt_retry",

@@ -285,8 +285,13 @@ export const ModelCall = z.object({
   // "smoke" is not a pipeline stage — it is the Phase 0 connectivity check. It
   // shares this enum so the telemetry path the real stages use is the one
   // exercised from the very first call this project makes.
+  // "brief" is stage 2a, one call over the whole clip. Separate from "adapt"
+  // (one call per segment) since 2026-09-08: pooling them made a whole-clip
+  // call indistinguishable from a per-segment one, which section d's
+  // per-segment cost footer cannot render honestly.
   stage: z.enum([
-    "smoke", "analyze", "adapt", "critique", "adapt_retry", "synthesize",
+    "smoke", "analyze", "brief", "adapt", "critique", "adapt_retry",
+    "synthesize",
   ]),
   model: z.string(),
   inputTokens: z.number().int().nonnegative(),

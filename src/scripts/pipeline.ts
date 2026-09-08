@@ -2,10 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { ffmpegAvailable } from "../lib/ffmpeg.ts";
-import { GEMINI_MODEL, type ThinkingLevel } from "../lib/gemini.ts";
+import { GEMINI_MODEL, parseThinkingLevel } from "../lib/gemini.ts";
 import { runAdapt, runAdaptRetry, runBrief } from "../modules/localize/adapt.stage.ts";
 import { runAnalyze } from "../modules/localize/analyze.stage.ts";
 import {
+  CRITIQUE_THINKING_LEVEL,
   latinScriptViolations,
   runCritique,
   selectForRetry,
@@ -51,9 +52,7 @@ const args = process.argv.slice(2);
 const noAudio = args.includes("--no-audio");
 const fromAnalysis = args.includes("--from-analysis");
 
-const thinkingArg = args.find((arg) => arg.startsWith("--thinking="));
-const thinkingLevel =
-  thinkingArg === undefined ? undefined : (thinkingArg.split("=")[1] as ThinkingLevel);
+const thinkingLevel = parseThinkingLevel(args);
 const thinking = thinkingLevel === undefined ? {} : { thinkingLevel };
 
 const positional = args.filter((arg) => !arg.startsWith("--"));
@@ -73,7 +72,9 @@ const calls: ModelCall[] = [];
 out();
 out("  Intent-preserving localization — analyze -> adapt -> critique");
 out(`  model     ${GEMINI_MODEL}`);
-out(`  thinking  ${thinkingLevel ?? "default"}`);
+out(
+  `  thinking  ${thinkingLevel ?? `model default, except critique at ${CRITIQUE_THINKING_LEVEL}`}`
+);
 out(`  target    Hindi (hi)`);
 out();
 
@@ -174,6 +175,17 @@ const selected = selectForRetry(critique, firstPass);
 
 let adaptation: Adaptation = firstPass;
 let retriedIds: string[] = [];
+/**
+ * Kept separate from `calls` so adaptation.json can list the calls that
+ * produced the text it actually contains.
+ *
+ * A retry rewrites segments in `adaptation`, so an adaptation.json whose `calls`
+ * stopped at the first pass would be a file describing text produced by calls it
+ * does not mention — and stage-critique.ts reads that list forward, so the retry
+ * telemetry would vanish from the stage-file chain while surviving only in
+ * job.json.
+ */
+let retryCalls: ModelCall[] = [];
 
 if (selected.length > 0) {
   out(`        ${selected.length} segment(s) failed the gate — re-adapting once:`);
@@ -190,7 +202,8 @@ if (selected.length > 0) {
 
   adaptation = retry.adaptation;
   retriedIds = retry.retriedIds;
-  calls.push(...retry.calls);
+  retryCalls = retry.calls;
+  calls.push(...retryCalls);
 } else {
   out("        no segment failed the gate");
 }
@@ -249,7 +262,7 @@ out();
 
 writeStageOutput("adaptation.json", {
   adaptation,
-  calls: [briefCall, ...adaptCalls],
+  calls: [briefCall, ...adaptCalls, ...retryCalls],
   retriedIds,
 });
 writeStageOutput("critique.json", { critique, retriedIds, calls: [critiqueCall] });

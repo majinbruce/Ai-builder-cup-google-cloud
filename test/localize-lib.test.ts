@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ffmpegAvailable } from "../src/lib/ffmpeg.ts";
-import { audioPart } from "../src/lib/gemini.ts";
+import { audioPart, parseThinkingLevel, THINKING_LEVELS } from "../src/lib/gemini.ts";
 import { loadPrompt } from "../src/lib/prompts.ts";
 
 /**
@@ -144,5 +144,38 @@ describe("ffmpegAvailable", () => {
 
     expect(version === null || typeof version === "string").toBe(true);
     if (version !== null) expect(version.length).toBeGreaterThan(0);
+  });
+});
+
+describe("parseThinkingLevel", () => {
+  it("returns undefined when the flag is absent, meaning the model's default", () => {
+    expect(parseThinkingLevel(["--no-audio", "--from-analysis"])).toBeUndefined();
+  });
+
+  it("accepts every level the model actually supports", () => {
+    for (const level of THINKING_LEVELS) {
+      expect(parseThinkingLevel([`--thinking=${level}`])).toBe(level);
+    }
+  });
+
+  /**
+   * The reason this function exists rather than a cast at the call site.
+   *
+   * `"minimal"` is in the SDK's union type and is a measured 400 on
+   * gemini-3.8-flash (docs/research.md). A `as ThinkingLevel` cast compiles
+   * fine and fails at the API — on the full pipeline, AFTER the analyze and
+   * brief calls have been paid for. Failing before the first request is the
+   * whole point.
+   */
+  it("rejects the level the SDK offers but the model 400s on", () => {
+    expect(() => parseThinkingLevel(["--thinking=minimal"])).toThrow(/minimal/);
+  });
+
+  it("rejects a typo rather than sending it", () => {
+    expect(() => parseThinkingLevel(["--thinking=lwo"])).toThrow(/low, medium, high/);
+  });
+
+  it("rejects an empty value", () => {
+    expect(() => parseThinkingLevel(["--thinking="])).toThrow();
   });
 });

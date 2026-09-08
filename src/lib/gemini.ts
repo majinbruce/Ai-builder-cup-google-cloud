@@ -135,7 +135,40 @@ export function audioPart(filePath: string): InputPart {
  * two-minute demo budget, and it is a per-stage decision: a stage whose job is
  * judgment should think, and a mechanical one should not have to.
  */
-export type ThinkingLevel = "low" | "medium" | "high";
+export const THINKING_LEVELS = ["low", "medium", "high"] as const;
+
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+/**
+ * Parses a `--thinking=<level>` CLI argument into the narrowed type.
+ *
+ * Exists because a bare `as ThinkingLevel` cast at the call site walks straight
+ * past the reason the type is narrow. `--thinking=minimal` is a measured 400
+ * (docs/research.md), and on the full pipeline that 400 arrives AFTER the
+ * analyze and brief calls have been paid for — the cast turns a compile-time
+ * guarantee back into a runtime failure at the most expensive possible moment.
+ * A typo (`--thinking=lwo`) fails the same way.
+ *
+ * Returns undefined when the flag is absent, which is what "use the model's
+ * default" means everywhere else in this module.
+ */
+export function parseThinkingLevel(args: readonly string[]): ThinkingLevel | undefined {
+  const flag = args.find((arg) => arg.startsWith("--thinking="));
+  if (flag === undefined) return undefined;
+
+  const value = flag.slice("--thinking=".length);
+
+  if (!(THINKING_LEVELS as readonly string[]).includes(value)) {
+    throw new Error(
+      `--thinking=${value} is not a supported thinking level. ` +
+        `Use one of: ${THINKING_LEVELS.join(", ")}. ` +
+        '("minimal" appears in the SDK\'s union type but is a 400 on ' +
+        `${GEMINI_MODEL} — measured 2026-09-07, docs/research.md.)`
+    );
+  }
+
+  return value as ThinkingLevel;
+}
 
 /** Anything with a `.debug()` — Fastify's logger, or a script's stand-in. */
 export interface CallLogger {

@@ -7,6 +7,7 @@ import {
 } from "../src/modules/localize/adapt.stage.ts";
 import {
   buildCritiqueInput,
+  CRITIQUE_THINKING_LEVEL,
   formatPairsForCritique,
   latinScriptViolations,
   RETRY_THRESHOLD,
@@ -24,6 +25,7 @@ import {
   AdaptationBrief,
   AdaptedSegment,
   Critique,
+  ModelCallStage,
   type Analysis,
   type AnalyzedSegment,
   type SegmentCritique,
@@ -539,3 +541,40 @@ function depth(schema: unknown): number {
 
   return 1 + Math.max(0, ...children);
 }
+
+describe("per-stage telemetry and thinking", () => {
+  /**
+   * The brief is one call over the whole clip; adapt is one call per segment.
+   * Reporting both as "adapt" made them indistinguishable in Job.calls, which
+   * SPEC section d's per-segment cost footer cannot render honestly — it would
+   * bill a whole-clip call to whichever segment sorted first.
+   */
+  it("gives the brief its own telemetry stage, separate from adapt", () => {
+    expect(ModelCallStage.options).toContain("brief");
+    expect(ModelCallStage.options).toContain("adapt");
+    expect(ModelCallStage.parse("brief")).toBe("brief");
+  });
+
+  it("keeps every stage the SPEC section b enum names", () => {
+    expect(ModelCallStage.options).toEqual([
+      "smoke",
+      "analyze",
+      "brief",
+      "adapt",
+      "critique",
+      "adapt_retry",
+      "synthesize",
+    ]);
+  });
+
+  /**
+   * docs/research.md § Thinking, DECIDED 2026-09-08 with numbers: critique at
+   * `low` spends exactly 0 thought tokens and takes 7.7 s instead of 14.9 s,
+   * with every score within 3 points and the same translationese quote on the
+   * same segment. This asserts the decision is in the code and not only in the
+   * document — which is the failure this test was written for.
+   */
+  it("defaults critique to the thinking level the measurement chose", () => {
+    expect(CRITIQUE_THINKING_LEVEL).toBe("low");
+  });
+});
