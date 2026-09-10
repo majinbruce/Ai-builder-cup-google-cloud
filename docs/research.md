@@ -206,6 +206,40 @@ Real runs on the 8-segment fixture adaptation, `hi-IN-Chirp3-HD-Kore`.
 | **Length drift — SPEC §g risk now MEASURED, not estimated** | Source span 62.6 s. The adapted Hindi as plain text at rate 1.0: **63.4 s, +1.2%** — so the character budget in `adapt.v1.md` works and the risk row's assumed 15–25% overrun does not materialise. With stage 4's pedagogical prosody applied: **69.8 s, +11.6%**, i.e. **+10.2% is time this stage adds on purpose** (8 emphasis pauses + 2 lead pauses ≈ 6.4 s, which closes the arithmetic). Measured with `--baseline`, which synthesizes every segment a second time as plain text purely to separate the two causes |
 | Why the decomposition is not optional | "Our output is 41% too long" and "our output is 11% too long, of which 10 points are pauses we chose to insert" are different claims and only one is honest. The `--baseline` control exists so the stage cannot take credit for the adapter's budget or blame the adapter for its own pauses |
 
+## Phase 4 — the pipeline behind the API, measured 2026-09-10
+
+`npm run e2e:localize` on `fixtures/sample_60s.mp3`, real Gemini + Chirp 3 HD, through
+`POST /api/v1/localize/jobs` and 2 s polling (so each stage time is ±2 s).
+
+| Item | Measured value |
+|---|---|
+| **Wall clock, upload → done** | **Three runs: 237.9 s, 226.8 s (uploaded through the browser UI), 215.8 s** — against SPEC §g's 120 s. First run: analyze 84.4 s · brief + adapt (9 segments) 136.9 s · critique 8.0 s · synthesize 6.1 s. The Phase 3 CLI run was 180.4 s; this run's analyze produced 9 segments rather than 8 and spent more thinking (48,046 thought tokens across 12 calls vs 35,508 in / 8,496 out), which is the variance Phase 1 already recorded (the third run: analyze 54.3 s, adapt 146.9 s for 10 segments, 37,204 thinking) — the API adds no measurable overhead of its own (ingest + storage + DB writes are inside the 2 s poll granularity) |
+| Stage 4 with concurrency 4 | **6.1 s** for 9 segments, down from ~16 s for 8 sequential in Phase 3. `SYNTH_CONCURRENCY = 4` in `synthesize.stage.ts`; per-segment `latencyMs` still records each call alone, so the per-segment cost reads as before |
+| Where the budget goes | ~93% is analyze + adapt, i.e. thinking. The levers left (`low` on adapt, batched adapt) change the Hindi, so they are to be judged on the Hindi, not pulled for the clock. The demo path is the pre-computed `/demo` job, which costs no model calls |
+| Output | 73.2 s of Hindi for a 63.1 s source span (+16%), 1,455 billed TTS chars; overall fidelity 93, naturalness 88; 0 segments retried at the real threshold; 8/15 emphasis claims backed by a measured energy rise |
+| Range | `GET .../audio/output` with `Range: bytes=0-1023` → 206 with 1,024 bytes; the full download ffprobes at the same 73.2 s the job reports |
+
+Found while building it, recorded because each would otherwise resurface:
+
+- **@fastify/multipart does not always error on an over-cap stream.** With
+  `limits.fileSize` set and the part's stream piped to disk, a 26 MiB upload arrived
+  *truncated* without the pipeline rejecting, and surfaced as ffmpeg refusing to
+  decode — a 400 "not audio" for a file that was merely large. The route now checks
+  `part.file.truncated` after the write as well as catching
+  `RequestFileTooLargeError`. The integration suite pins the 413.
+- **Every 429 in the API was a 500.** `plugins/security.ts`'s
+  `errorResponseBuilder` returned the house envelope (`statusCode: -1`); the
+  rate-limit plugin *throws* whatever that returns, so the error handler read
+  `statusCode: -1` as the HTTP status. It now returns an `AppError(…, 429)`. This
+  affected sign-in's limiter too; nothing had tested an exceeded limit before the
+  localize suite's jobs-per-hour test.
+- **Devanagari needs a shipped font.** A machine with no Devanagari face renders
+  every Hindi string as tofu. `web/` now self-hosts Noto Sans Devanagari via
+  `next/font` for `[lang="hi"]` and as a per-glyph fallback in the base stack.
+- **A nested Fastify `register(plugin, opts)` re-applies `opts.prefix`.** Passing a
+  parent plugin's options through mounted every route at
+  `/api/v1/localize/api/v1/localize/*` — found by the first e2e run's 404.
+
 ## Cloud Run
 
 - Request timeout default 300 s, max 3600 s. Jobs run async; never block a request on the pipeline. https://docs.cloud.google.com/run/docs/configuring/request-timeout

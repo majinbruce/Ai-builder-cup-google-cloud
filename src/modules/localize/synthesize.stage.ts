@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { concatAudio, encodeMp3, probeDurationSec } from "../../lib/ffmpeg.ts";
-import { TTS_VOICE, clampSpeakingRate, synthesize, type TtsInput } from "../../lib/tts.ts";
+import {
+  TTS_VOICE,
+  clampSpeakingRate,
+  synthesize,
+  type TtsInput,
+} from "../../lib/tts.ts";
 import { countSpokenChars, findLatinRuns } from "./drift.ts";
 import { Synthesis } from "./localize.schemas.ts";
 import type {
@@ -202,14 +207,47 @@ export interface SynthesizeOutput {
 }
 
 /**
+ * How many segments are synthesized at once.
+ *
+ * Phase 3 ran them one at a time on purpose, to get a readable per-segment
+ * number first (1.4-2.6 s each, ~16 s for the fixture's eight). Unlike adapt,
+ * these calls are genuinely independent — no segment's audio depends on
+ * another's — so Phase 4 pulls the lever research.md left for it. Four rather
+ * than "all": a 180 s clip is up to ~45 segments, and 45 simultaneous requests
+ * is how a per-minute quota gets found.
+ */
+export const SYNTH_CONCURRENCY = 4;
+
+/**
+ * Runs `task` over `items` with at most `limit` in flight, results in INPUT
+ * order. Order is the whole requirement: the concat below joins files in array
+ * order, and a segment finishing early must not move in the lecture.
+ */
+async function mapBounded<T, R>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await task(items[index] as T, index);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/**
  * Synthesizes every segment, joins them, and measures the result.
  *
- * Sequential rather than concurrent, matching adapt. Not because it has to be —
- * unlike adapt, these calls are genuinely independent and could all be in flight
- * at once — but because Phase 3's job is to produce the first honest end-to-end
- * number, and a concurrency change made in the same commit would make it
- * impossible to say what the pipeline costs per segment. The lever is noted in
- * docs/research.md for Phase 4, where it is worth pulling.
+ * Up to SYNTH_CONCURRENCY segments in flight; see the constant for why.
+ * Each segment's `latencyMs` is still its own call's latency, so the
+ * per-segment cost reads the same as in Phase 3 — only the wall clock changes.
  */
 export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeOutput> {
   const { analysis, adaptation, outDir, voice = TTS_VOICE, onSegment } = input;
@@ -222,10 +260,12 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
   const segmentDir = path.join(outDir, "segments");
   fs.mkdirSync(segmentDir, { recursive: true });
 
-  const segments: SynthesizedSegment[] = [];
-  const segmentFiles: string[] = [];
-
-  for (const [index, adapted] of adaptation.segments.entries()) {
+  /**
+   * Every segment is checked before ANY is sent. With calls in flight
+   * concurrently, a check inside the task would let the segments already
+   * dispatched finish and bill while the run was failing anyway.
+   */
+  for (const adapted of adaptation.segments) {
     const source = sourceById.get(adapted.id);
     if (source === undefined) {
       throw new Error(
@@ -247,6 +287,22 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
           "pronunciation risk (docs/SPEC.md section b)."
       );
     }
+  }
+
+  const synthesized = await mapBounded(
+    adaptation.segments,
+    SYNTH_CONCURRENCY,
+    (adapted, index) => synthesizeOne(adapted, index)
+  );
+
+  const segments = synthesized.map((entry) => entry.segment);
+  const segmentFiles = synthesized.map((entry) => entry.file);
+
+  async function synthesizeOne(
+    adapted: AdaptedSegment,
+    index: number
+  ): Promise<{ segment: SynthesizedSegment; file: string }> {
+    const source = sourceById.get(adapted.id) as AnalyzedSegment;
 
     onSegment?.(adapted, index, adaptation.segments.length);
 
@@ -260,9 +316,8 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
 
     const file = path.join(segmentDir, `${adapted.id}.wav`);
     fs.writeFileSync(file, result.audio);
-    segmentFiles.push(file);
 
-    segments.push({
+    const segment: SynthesizedSegment = {
       id: adapted.id,
       startSec: source.startSec,
       endSec: source.endSec,
@@ -277,7 +332,9 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
       emphasisNotFound: built.emphasisNotFound,
       emphasisPausedTerm: built.emphasisPausedTerm,
       emphasisNotRealized: built.emphasisNotRealized,
-    });
+    };
+
+    return { segment, file };
   }
 
   const joinedWav = path.join(outDir, "output.wav");

@@ -43,7 +43,7 @@ const SECURE_SESSION_COOKIE = `__Secure-${SESSION_COOKIE}`;
  * `requireSession()` call in the route's layout — this list alone protects
  * nothing (see above).
  */
-const PROTECTED_PREFIXES = ["/dashboard", "/settings", "/admin"];
+const PROTECTED_PREFIXES = ["/dashboard", "/settings", "/admin", "/localize"];
 
 /**
  * Pages a signed-in user has no reason to see. Landing on /sign-in with a live
@@ -51,7 +51,7 @@ const PROTECTED_PREFIXES = ["/dashboard", "/settings", "/admin"];
  */
 const AUTH_PAGES = ["/sign-in", "/sign-up", "/forgot-password"];
 
-const DEFAULT_SIGNED_IN_PATH = "/dashboard";
+const DEFAULT_SIGNED_IN_PATH = "/localize";
 
 function hasSessionCookie(request: NextRequest): boolean {
   return (

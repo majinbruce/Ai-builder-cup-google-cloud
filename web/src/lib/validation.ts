@@ -65,3 +65,26 @@ export type ResetPasswordValues = z.infer<typeof resetPasswordSchema>;
 
 export const profileSchema = z.object({ name: nameSchema });
 export type ProfileValues = z.infer<typeof profileSchema>;
+
+/**
+ * The localize upload. Mirrors the API's caps (MAX_UPLOAD_BYTES, the accepted
+ * MIME types in localize.routes.ts); the API additionally checks the decoded
+ * duration, which only ffprobe can know.
+ */
+export const uploadSchema = z.object({
+  file: z
+    .custom<FileList>(
+      (value) => typeof FileList !== "undefined" && value instanceof FileList,
+      "Choose a file"
+    )
+    .refine((files) => files.length === 1, "Choose one audio or video file")
+    .refine((files) => {
+      const type = files[0]?.type ?? "";
+      return type.startsWith("audio/") || type === "video/mp4";
+    }, "Must be an audio file or an mp4 video")
+    .refine(
+      (files) => (files[0]?.size ?? 0) <= 25 * 1024 * 1024,
+      "Files must be 25 MB or smaller"
+    ),
+});
+export type UploadValues = z.infer<typeof uploadSchema>;

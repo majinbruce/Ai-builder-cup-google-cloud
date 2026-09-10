@@ -347,8 +347,17 @@ export const Job = z.object({
   sourceUri: z.string().nullable(),
   error: z.string().nullable(),
   analysis: Analysis.nullable(),
+  // Amended 2026-09-10, Phase 4. Stage 1's emphasis claims scored against
+  // ffmpeg: section d item 2's "evidence on hover" shows the model's evidence
+  // beside what was measured, and without this field it could show only the
+  // former.
+  corroboration: Corroboration.nullable(),
   adaptation: Adaptation.nullable(),
   critique: Critique.nullable(),
+  // Amended 2026-09-10, Phase 4. Section d item 5 promises a "regenerated after
+  // critique" badge and the Job had no field to draw it from. NB: the critique
+  // scores a retried segment's FIRST draft; the panel says so.
+  retriedIds: z.array(z.string()).nullable(),
   synthesis: Synthesis.nullable(),
   calls: z.array(ModelCall),
   createdAt: z.iso.datetime(),
@@ -357,19 +366,35 @@ export const Job = z.object({
 ```
 
 Table `localize_jobs`: `id`, `user_id`, `status`, `target_language`,
-`source_uri`, `error`, `analysis jsonb`, `adaptation jsonb`, `critique jsonb`,
-`synthesis jsonb`, `calls jsonb`, timestamps. Stage outputs are opaque JSON
+`source_uri`, `error`, `analysis jsonb`, `corroboration jsonb`, `adaptation jsonb`,
+`critique jsonb`, `retried_ids jsonb`, `synthesis jsonb`, `calls jsonb`,
+`is_demo boolean`, timestamps. Stage outputs are opaque JSON
 validated by the Zod schemas above at write and read.
 
 ### API surface (`src/modules/localize/`)
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/api/v1/localize/jobs` | multipart; returns `Job` with `status: queued` |
-| GET | `/api/v1/localize/jobs/:id` | poll; full `Job` |
-| GET | `/api/v1/localize/jobs/:id/audio/:which` | `source` or `output`, signed GCS redirect |
+| POST | `/api/v1/localize/jobs` | multipart; 202 with `Job` in `status: queued`; 5 per user per hour |
+| GET | `/api/v1/localize/jobs` | the caller's jobs, `JobSummary[]`, paginated |
+| GET | `/api/v1/localize/jobs/:id` | poll; full `Job`; owner only (another user's id is a 404) |
+| GET | `/api/v1/localize/jobs/:id/audio/:which` | `source` or `output`, streamed with HTTP Range (206) |
 | POST | `/api/v1/localize/jobs/:id/segments/:sid/regenerate` | SHOULD |
-| GET | `/api/v1/localize/demo` | returns the pre-computed fixture job id |
+| GET | `/api/v1/localize/demo` | public; the full promoted demo `Job` |
+| GET | `/api/v1/localize/demo/audio/:which` | public; the demo job's audio, Range-aware |
+
+**Amended 2026-09-10, Phase 4 — three departures from the table as first written.**
+Audio is *streamed through the API with Range support*, not a signed GCS redirect:
+V4 signing on Cloud Run needs the runtime service account granted
+`iam.serviceAccountTokenCreator` on itself (missing by default, discovered on
+deploy day), a signed URL is a bearer link that skips the owner check, and the
+reasoning panel's per-segment play button seeks, which needs Range — which a
+range-aware stream gives the GCS and local-disk backends identically. `/demo`
+returns the *full Job* rather than an id, so `/jobs/:id` never needs a public
+exception; the demo is a real API job flagged by `npm run localize:promote-demo`,
+never a hand-seeded import. Ingest (normalize, length cap, silence check) runs
+*inside* the POST, so an over-length clip is a 400 the uploader sees at once; the
+`ingesting` status is therefore reserved and never observed.
 
 Jobs run in-process after the POST returns (Cloud Run default request timeout
 is 300 s; the pipeline takes ~60–90 s but must not sit on a request). `min-instances=1`
@@ -527,7 +552,7 @@ The margin comes out of the SHOULD list, which is cut before any MUST slips.
 | Hindi runs 15–25% longer than the English, so `output.mp3` drifts out of sync with `source.mp3` in the side-by-side view | Output duration materially exceeds source on the fixture | Open — decide in Phase 2: accept and state it, fit `speakingRate` per segment to the source span, or give Adapt a per-segment length budget. Listed here so it is not discovered during Phase 4. |
 | Chirp 3 HD ignores SSML `<prosody>`/`<emphasis>` (docs conflict) | Phase 3 spike shows no audible change | Use `speaking_rate` + `[pause]` markup only (confirmed for hi-IN), or switch voice to `hi-IN-Neural2-*` which supports full SSML. |
 | Free-tier rate limit hit when a judge and the demo run together | 429 from Gemini | **Measured 2026-09-07: the free tier is 5 RPM, not the ≈10 previously assumed, and one job is 4–5 calls — so a single run nearly exhausts the minute and two concurrent runs cannot both pass.** Enabling billing (Tier 1) is therefore a submission requirement, not a precaution. Plus exponential backoff, and a pre-computed demo job that never calls Gemini. |
-| Per-call latency eats the demo budget | Pipeline exceeds ~2 min on a 90 s clip | Measured: a *trivial* call costs ~16.5 s and 209 thought tokens at default thinking. Five sequential stages start at ~80 s before audio. Levers, in order: `thinking_level: "low"` on the mechanical stages (critique, adapt retry), batch segments per call rather than per segment, and run adapt and critique on the whole transcript in one call each. Decide with real numbers at the end of Phase 2. |
+| Per-call latency eats the demo budget | Pipeline exceeds ~2 min on a 90 s clip | Measured: a *trivial* call costs ~16.5 s and 209 thought tokens at default thinking. Five sequential stages start at ~80 s before audio. Levers, in order: `thinking_level: "low"` on the mechanical stages (critique, adapt retry), batch segments per call rather than per segment, and run adapt and critique on the whole transcript in one call each. Decide with real numbers at the end of Phase 2. **Measured through the API 2026-09-10 (Phase 4): 215.8–237.9 s upload-to-done over three runs on the fixture; the slowest was analyze 84.4 s, brief + adapt 136.9 s for 9 segments, critique 8.0 s, synthesis 6.1 s (was ~16 s; now 4 concurrent).** Still double the budget, and ~93% of it is analyze + adapt, where the thinking is. The remaining levers (`low` on adapt, batched adapt) change the Hindi and must be judged on it, so they are not pulled blind; the demo meanwhile runs off the pre-computed `/demo` job. |
 | Cloud Run request timeout / scale-to-zero kills a running job | Job stuck in `analyzing` | Async runner + polling already in design; `min-instances=1`; job marked `failed` on process start if older than 10 min. |
 | Structured output rejects a "deeply nested" schema | 400 on `response_format` | Schemas are two levels deep by design; split Adapt into two calls if needed. |
 | No native Hindi judge on the team | — | Critique back-translation and fidelity are shown in the UI as the quality evidence; ask a Hindi-speaking colleague to review the fixture output once before recording. |

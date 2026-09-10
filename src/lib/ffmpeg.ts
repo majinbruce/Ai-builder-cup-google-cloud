@@ -122,7 +122,17 @@ export function parseMeanVolumeDb(ffmpegStderr: string): number {
 export async function measureMeanVolumeDb(filePath: string): Promise<number> {
   const { stderr } = await run(
     "ffmpeg",
-    ["-hide_banner", "-nostats", "-i", filePath, "-af", "volumedetect", "-f", "null", "-"],
+    [
+      "-hide_banner",
+      "-nostats",
+      "-i",
+      filePath,
+      "-af",
+      "volumedetect",
+      "-f",
+      "null",
+      "-",
+    ],
     { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
   );
 
@@ -318,10 +328,7 @@ export function escapeConcatPath(filePath: string): string {
  * quietly added or dropped milliseconds would corrupt the measurement it exists
  * to enable.
  */
-export async function concatAudio(
-  inputPaths: string[],
-  outPath: string
-): Promise<void> {
+export async function concatAudio(inputPaths: string[], outPath: string): Promise<void> {
   if (inputPaths.length === 0) {
     throw new Error("concatAudio was given no inputs. There is nothing to join.");
   }
@@ -369,6 +376,10 @@ export async function encodeMp3(inPath: string, outPath: string): Promise<void> 
       "-y",
       "-i",
       inPath,
+      // No video stream in, no video stream out. Without this an mp4 upload
+      // makes ffmpeg try to map its picture into an mp3 and fail; with it, the
+      // same call is both stage 0's ingest normalizer and stage 4's encoder.
+      "-vn",
       "-ar",
       "16000",
       "-ac",

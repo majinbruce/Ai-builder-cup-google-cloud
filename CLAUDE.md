@@ -68,6 +68,14 @@ theme). Deadline 4 Oct 2026.
 - Each pipeline stage is runnable in isolation from `src/scripts/stage-*.ts`
   against `fixtures/sample_60s.mp3` (`npm run stage:analyze` etc.), so one stage
   can be demoed or debugged alone.
+- The whole product over HTTP: `npm run dev`, then `npm run e2e:localize --
+  --password=...` (account from `ADMIN_PASSWORD=... npm run create-admin --
+  e2e@local.test --create`). `npm run localize:promote-demo -- <jobId>` makes a
+  finished job the public `/demo`. The integration suite stubs the stages through
+  the `Stages` seam in `localize.service.ts`. If 5432 is taken by another
+  project's Postgres, start ours with `PG_PUBLISHED_PORT=5433 docker compose up -d
+  postgres` and run `PG_PORT=5433 npm run test:integration` — never migrate into
+  someone else's server.
 - Log token usage and latency per Gemini call via `request.log`. A 60–90 s clip must
   complete in < 2 min for the demo.
 - Gemini/GCP settings go through `src/config/index.ts` like everything else

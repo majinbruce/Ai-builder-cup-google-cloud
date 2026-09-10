@@ -1,4 +1,4 @@
-import { buildApp, type App } from "../src/app.ts";
+import { buildApp, type App, type BuildAppOptions } from "../src/app.ts";
 import type { Mailer } from "../src/lib/mailer.ts";
 
 /**
@@ -12,8 +12,11 @@ import type { Mailer } from "../src/lib/mailer.ts";
  * which is exactly what the `unit` project in vitest.config.ts runs, and why
  * only the `integration` project carries a globalSetup.
  */
-export const buildTestApp = async (mailer?: Mailer): Promise<App> => {
-  const app = await buildApp(mailer === undefined ? {} : { mailer });
+export const buildTestApp = async (
+  mailer?: Mailer,
+  options: Omit<BuildAppOptions, "mailer"> = {}
+): Promise<App> => {
+  const app = await buildApp({ ...options, ...(mailer === undefined ? {} : { mailer }) });
   await app.ready();
   return app;
 };

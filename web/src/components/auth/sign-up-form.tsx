@@ -73,13 +73,13 @@ export function SignUpForm() {
     }
 
     router.refresh();
-    router.push("/dashboard");
+    router.push("/localize");
   };
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} noValidate>
       <FieldGroup>
-        <SocialButtons callbackURL="/dashboard" />
+        <SocialButtons callbackURL="/localize" />
 
         <Field data-invalid={errors.name !== undefined}>
           <FieldLabel htmlFor="name">Name</FieldLabel>

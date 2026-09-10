@@ -15,6 +15,12 @@ export interface ApiRequestOptions {
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   /** Serialised as JSON. Use `undefined`, not `null`, for "no body". */
   body?: unknown;
+  /**
+   * Sent as multipart/form-data, for file uploads. Mutually exclusive with
+   * `body`. No content-type header is set: the browser has to write it itself,
+   * because only the browser knows the boundary it chose.
+   */
+  formData?: FormData;
   /** Appended as a query string; `undefined` values are dropped. */
   query?: Record<string, string | number | boolean | undefined>;
   signal?: AbortSignal;
@@ -38,7 +44,7 @@ export async function apiFetch<T extends z.ZodType>(
   schema: T,
   options: ApiRequestOptions = {}
 ): Promise<z.infer<T>> {
-  const { method = "GET", body, query, signal } = options;
+  const { method = "GET", body, formData, query, signal } = options;
 
   let response: Response;
 
@@ -50,6 +56,7 @@ export async function apiFetch<T extends z.ZodType>(
       credentials: "same-origin",
       headers: body === undefined ? {} : { "content-type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(formData === undefined ? {} : { body: formData }),
       ...(signal ? { signal } : {}),
     });
   } catch (cause) {

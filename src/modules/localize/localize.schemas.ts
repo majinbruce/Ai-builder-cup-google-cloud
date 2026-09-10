@@ -554,6 +554,88 @@ export const Synthesis = z.object({
 export type SynthesizedSegment = z.infer<typeof SynthesizedSegment>;
 export type Synthesis = z.infer<typeof Synthesis>;
 
+/**
+ * ============================================================================
+ * The job — Postgres row and API DTO (docs/SPEC.md section b, Phase 4)
+ * ============================================================================
+ *
+ * Every stage artifact above is nullable here because a job is read while it is
+ * still running: the UI polls, and a job in `adapting` has an analysis and
+ * nothing else. Each field turns non-null the moment its stage writes it.
+ *
+ * Two fields beyond the SPEC's original Job, amended there in the same commit:
+ *
+ *   corroboration  stage 1's emphasis claims scored against ffmpeg. The
+ *                  reasoning panel's "evidence on hover" (SPEC section d, item 2)
+ *                  is meant to show the model's stated evidence beside what was
+ *                  measured, and without this field it could only show the
+ *                  former — the model's claim with nothing to check it against.
+ *   retriedIds     which segments went back through adapt after failing the
+ *                  critique. Section d item 5 promises a "regenerated after
+ *                  critique" badge, and the SPEC Job had no field to draw it from.
+ */
+export const JobStatus = z.enum([
+  "queued",
+  // Reserved. Ingest runs inside the POST, so that a clip over the length cap
+  // is a 400 the uploader sees immediately rather than a job that fails a
+  // second later — which means no row is ever observed in this state.
+  "ingesting",
+  "analyzing",
+  "adapting",
+  "critiquing",
+  "synthesizing",
+  "done",
+  "failed",
+]);
+
+export const Job = z.object({
+  id: z.uuid(),
+  status: JobStatus,
+  targetLanguage: z.string(),
+  sourceUri: z.string().nullable(),
+  error: z.string().nullable(),
+  analysis: Analysis.nullable(),
+  corroboration: Corroboration.nullable(),
+  adaptation: Adaptation.nullable(),
+  critique: Critique.nullable(),
+  retriedIds: z.array(z.string()).nullable(),
+  synthesis: Synthesis.nullable(),
+  calls: z.array(ModelCall),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+
+/**
+ * The list row. The full Job is tens of kilobytes of Hindi and reasoning; a list
+ * of twenty of them would ship all of it to draw twenty titles.
+ */
+export const JobSummary = z.object({
+  id: z.uuid(),
+  status: JobStatus,
+  topic: z.string().nullable(),
+  segmentCount: z.number().int().nonnegative().nullable(),
+  error: z.string().nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+
+export const JobIdParams = z.object({ id: z.uuid() });
+
+export const AudioWhich = z.enum(["source", "output"]);
+export const JobAudioParams = z.object({ id: z.uuid(), which: AudioWhich });
+export const DemoAudioParams = z.object({ which: AudioWhich });
+
+export const ListJobsQuery = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+export type JobStatus = z.infer<typeof JobStatus>;
+export type Job = z.infer<typeof Job>;
+export type JobSummary = z.infer<typeof JobSummary>;
+export type AudioWhich = z.infer<typeof AudioWhich>;
+export type ListJobsQuery = z.infer<typeof ListJobsQuery>;
+
 export type ChoiceKind = z.infer<typeof ChoiceKind>;
 export type AdaptationChoice = z.infer<typeof AdaptationChoice>;
 export type GlossaryEntry = z.infer<typeof GlossaryEntry>;

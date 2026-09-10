@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist } from "next/font/google";
+import { Geist, Noto_Sans_Devanagari } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
 import { SiteHeader } from "@/components/layout/site-header";
@@ -8,6 +8,18 @@ import { getSiteConfig } from "@/lib/site-config.server";
 import { cn } from "@/lib/utils";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
+
+/**
+ * The Hindi side of every localized job. Self-hosted by next/font at build
+ * time rather than left to the viewer's system fonts: a machine with no
+ * Devanagari face (a stock Linux box, a headless browser) renders the entire
+ * product as tofu boxes, which is how the Phase 4 browser check found it.
+ * Applied to `[lang="hi"]` in globals.css, so only Hindi text pays for it.
+ */
+const devanagari = Noto_Sans_Devanagari({
+  subsets: ["devanagari"],
+  variable: "--font-devanagari",
+});
 
 /**
  * `generateMetadata` rather than a static `metadata` export, because the title
@@ -35,7 +47,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
     // hydrates, so the server's markup and the client's genuinely differ by one
     // attribute. Without this, that legitimate difference is logged as an error
     // on every page load. It suppresses the warning for THIS element only.
-    <html lang="en" suppressHydrationWarning className={cn("font-sans", geist.variable)}>
+    <html lang="en" suppressHydrationWarning className={cn("font-sans", geist.variable, devanagari.variable)}>
       <body className="min-h-dvh bg-background text-foreground antialiased">
         <Providers siteConfig={siteConfig}>
           <div className="flex min-h-dvh flex-col">

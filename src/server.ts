@@ -14,6 +14,7 @@ import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { buildApp } from "./app.ts";
 import { config } from "./config/index.ts";
+import { failStaleJobs } from "./modules/localize/localize.service.ts";
 
 const app = await buildApp();
 
@@ -127,3 +128,14 @@ try {
   app.log.error({ err }, "Failed to start server");
   process.exit(1);
 }
+
+/**
+ * Localization jobs run in-process, so a job that was mid-pipeline when the last
+ * process died will never finish on its own (SPEC section g). Reaped here rather
+ * than in an onReady hook because the unit suite builds the app with no
+ * database; and after listen, because a failure to reap is worth a log line and
+ * not worth refusing traffic over.
+ */
+await failStaleJobs({ db: app.db, log: app.log }).catch((err: unknown) => {
+  app.log.error({ err }, "could not reap orphaned localize jobs");
+});

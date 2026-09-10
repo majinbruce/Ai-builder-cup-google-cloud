@@ -30,7 +30,7 @@ export default async function VerifyEmailCallbackPage({
   const error = typeof params.error === "string" ? params.error : null;
 
   if (error === null) {
-    redirect("/dashboard");
+    redirect("/localize");
   }
 
   return (

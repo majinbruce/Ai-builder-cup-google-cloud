@@ -19,6 +19,8 @@ import swaggerPlugin from "./plugins/swagger.ts";
 import healthRoutes from "./modules/health/health.routes.ts";
 import authRoutes from "./modules/auth/auth.routes.ts";
 import userRoutes from "./modules/user/user.routes.ts";
+import localizeRoutes from "./modules/localize/localize.routes.ts";
+import type { Stages } from "./modules/localize/localize.service.ts";
 
 /**
  * An upstream `x-request-id` is attacker-controlled until proven otherwise.
@@ -50,6 +52,8 @@ const acceptUpstreamRequestId = (
 export interface BuildAppOptions {
   /** Injected by the tests; production uses the console mailer by default. */
   mailer?: Mailer;
+  /** Injected by the integration suite so a job runs without Gemini or TTS. */
+  localizeStages?: Stages;
 }
 
 /**
@@ -166,6 +170,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
    */
   await app.register(authRoutes, { prefix: config.auth.basePath });
   await app.register(userRoutes, { prefix: "/api/v1/users" });
+  await app.register(localizeRoutes, {
+    prefix: "/api/v1/localize",
+    ...(options.localizeStages === undefined ? {} : { stages: options.localizeStages }),
+  });
 
   return app;
 }

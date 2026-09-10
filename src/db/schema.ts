@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   index,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -165,11 +166,81 @@ export const verifications = pgTable(
 );
 
 /**
+ * The job statuses, in pipeline order. Mirrored by `JobStatus` in
+ * localize.schemas.ts, which is the API's view of the same list; the CHECK
+ * below is the database's, for the same reason `users.role` has one.
+ */
+export const LOCALIZE_JOB_STATUSES = [
+  "queued",
+  "ingesting",
+  "analyzing",
+  "adapting",
+  "critiquing",
+  "synthesizing",
+  "done",
+  "failed",
+] as const;
+
+/**
+ * One localization job: an uploaded clip and everything the pipeline has said
+ * about it so far.
+ *
+ * The stage artifacts are jsonb, and deliberately opaque to Postgres. Their
+ * contract is the Zod schemas in localize.schemas.ts, which validate them on the
+ * way in (the stage parsed them) and on the way out (the repository parses
+ * them again before a DTO is built). Normalizing twelve segments across four
+ * tables would buy queries nobody runs, at the price of a second definition of
+ * shapes that already have one.
+ *
+ * Each artifact is written the moment its stage finishes, which is what lets
+ * the UI show the analysis while adaptation is still running.
+ */
+export const localizeJobs = pgTable(
+  "localize_jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Cascade: deleting an account deletes its jobs. The files are not reaped yet. */
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    status: text("status", { enum: LOCALIZE_JOB_STATUSES }).notNull().default("queued"),
+    targetLanguage: text("target_language").notNull(),
+    sourceUri: text("source_uri"),
+    error: text("error"),
+    analysis: jsonb("analysis"),
+    /** Stage 1's emphasis claims scored against ffmpeg — ours, never the model's. */
+    corroboration: jsonb("corroboration"),
+    adaptation: jsonb("adaptation"),
+    critique: jsonb("critique"),
+    /** Segment ids re-adapted once after failing the critique gate. */
+    retriedIds: jsonb("retried_ids"),
+    synthesis: jsonb("synthesis"),
+    calls: jsonb("calls").notNull().default([]),
+    /**
+     * The job GET /api/v1/localize/demo serves signed-out. Set by
+     * `npm run localize:promote-demo`, never by the API, so the demo is always a
+     * real job the API produced rather than a seeded import.
+     */
+    isDemo: boolean("is_demo").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Matches the list query: one user's jobs, newest first.
+    index("localize_jobs_user_created_idx").on(table.userId, table.createdAt.desc()),
+    check(
+      "localize_jobs_status_check",
+      sql`${table.status} IN ('queued', 'ingesting', 'analyzing', 'adapting', 'critiquing', 'synthesizing', 'done', 'failed')`
+    ),
+  ]
+);
+
+/**
  * The whole schema as one object. plugins/db.ts hands this to drizzle() so that
  * `db.query.users.findFirst(...)` exists, and auth.factory.ts hands the same
  * tables to the Better Auth adapter — one source, two consumers.
  */
-export const schema = { users, sessions, accounts, verifications };
+export const schema = { users, sessions, accounts, verifications, localizeJobs };
 
 /**
  * Row types, INFERRED. The hand-written `type UserRow = {...}` this replaces
@@ -180,3 +251,4 @@ export type UserRow = typeof users.$inferSelect;
 export type NewUserRow = typeof users.$inferInsert;
 export type SessionRow = typeof sessions.$inferSelect;
 export type AccountRow = typeof accounts.$inferSelect;
+export type LocalizeJobRow = typeof localizeJobs.$inferSelect;

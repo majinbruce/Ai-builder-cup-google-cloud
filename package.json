@@ -35,7 +35,9 @@
     "stage:critique": "node src/scripts/stage-critique.ts",
     "stage:synthesize": "node src/scripts/stage-synthesize.ts",
     "pipeline": "node src/scripts/pipeline.ts",
-    "spike:tts": "node src/scripts/spike-tts.ts"
+    "spike:tts": "node src/scripts/spike-tts.ts",
+    "e2e:localize": "node src/scripts/e2e-localize.ts",
+    "localize:promote-demo": "node src/scripts/promote-demo.ts"
   },
   "dependencies": {
     "@fastify/compress": "^9.2.0",

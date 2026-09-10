@@ -41,7 +41,7 @@ export function SignInForm() {
   const searchParams = useSearchParams();
 
   // Where the proxy sent them from, sanitised — see lib/safe-redirect.ts.
-  const next = safeRedirect(searchParams.get("next"), "/dashboard");
+  const next = safeRedirect(searchParams.get("next"), "/localize");
 
   const form = useForm<SignInValues>({
     resolver: zodResolver(signInSchema),

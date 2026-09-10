@@ -338,3 +338,49 @@ plays, the pauses land where `ttsHints` asked and ffprobe confirms it, and SPEC
 §g's last risk row — a native Hindi speaker reviewing the fixture output before
 the video is recorded — is still outstanding. It is listed as outstanding rather
 than quietly satisfied by the fact that the file exists.
+
+---
+
+## Phase 4 — API module and web UI
+
+**"Phase 4 is a job table, a polling endpoint and a React page. That is plumbing
+every CRUD app has. Where is the meaningful use of Gen AI in it — and isn't the
+'reasoning panel' just a nicer rendering of text the model wrote to justify
+itself?"**
+
+Phase 4 adds no model call, and that is the point of it: it is the phase where
+twelve Gemini calls stop being JSON in a terminal and become something an
+educator can audit, and it is built so that it cannot quietly turn into
+post-hoc storytelling. The panel makes **zero** model calls. It renders only what
+the pipeline already computed, so there is no "explain this choice" request
+generating a justification after the fact. The rationale on screen was written
+in the same call that wrote the Hindi. The critic's back-translation shown under
+it came from a call that, by construction of `buildCritiqueInput()`, never saw
+that rationale. The self-justification the question is worried about is exactly
+what the layout is designed to expose. Every model claim sits beside something
+the model did not write:
+- the analyzer's "marked volume surge" on *more than make up*, beside ffmpeg's
+  measured energy rise at 0:25.5, with a verdict tag. On the fixture run, 8 of 15
+  emphasis claims were energy-backed, and the other 7 are on screen too, marked
+  unsupported.
+- the adapter's idiom choice, beside the literal translation it replaced.
+- the adapter's confidence, beside the blind critic scoring that same segment's
+  naturalness at 78 and quoting the calqued clause verbatim.
+- the stressed Hindi terms, beside the exact SSML sent to Chirp 3 HD. Terms the
+  voice did nothing for are labelled "not voiced".
+- a regenerated segment, beside the note that its scores belong to the draft it
+  replaced. That is true, because the critique runs once, before the retry. The UI
+  says so rather than letting old scores decorate new text.
+
+The per-segment footer puts the cost of that reasoning (tokens, thinking,
+latency, TTS characters) next to the reasoning itself, because the product's
+claim is that the judgment is worth what it costs, and that is only arguable with
+the bill visible. What the phase honestly does not fix is time: three real runs
+through the API took **215.8–237.9 s** upload-to-done against a 120 s budget.
+Analyze and adapt, where the thinking is, account for about 93% of it. The only
+lever pulled here was the one that changes no model output: synthesis went from
+~16 s to 6.1 s by running four TTS calls at once. Mitigating the wait is
+product design, not a hidden number. Stage artifacts are written the moment each
+stage ends, so the learner sees the segmented, labelled transcript 55–90 s in
+while the Hindi is still being written, and the public `/demo` is a real job this
+API ran, flagged afterwards, with its telemetry intact.

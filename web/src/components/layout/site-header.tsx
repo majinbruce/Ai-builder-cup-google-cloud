@@ -19,9 +19,17 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 w-full border-b bg-background/80 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-5xl items-center justify-between gap-4 px-4">
-        <Link href="/" className="font-semibold tracking-tight">
-          {env.APP_NAME}
-        </Link>
+        <nav className="flex items-center gap-5 text-sm">
+          <Link href="/" className="font-semibold tracking-tight">
+            {env.APP_NAME}
+          </Link>
+          <Link href="/demo" className="text-muted-foreground hover:text-foreground">
+            Demo
+          </Link>
+          <Link href="/localize" className="text-muted-foreground hover:text-foreground">
+            Localize
+          </Link>
+        </nav>
 
         <div className="flex items-center gap-1.5">
           <ThemeToggle />

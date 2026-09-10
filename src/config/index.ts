@@ -312,14 +312,25 @@ const envSchemaWithRules = envSchema
      * logs the body, and every verification and password-reset link is
      * delivered to nobody. Refusing at boot turns a silent dead end into one
      * line at startup.
+     *
+     * Relaxed when verification is OFF, and only then (SPEC section f, Phase 4).
+     * The hackathon deploy runs one seeded demo account with
+     * AUTH_REQUIRE_EMAIL_VERIFICATION=false, so no sign-up is ever waiting on a
+     * mail; what the console mailer silently swallows there is password reset,
+     * which a seeded account does not use. With verification on, the original
+     * dead end is back and so is the refusal.
      */
-    (env) => env.NODE_ENV !== "production" || env.MAIL_PROVIDER !== "console",
+    (env) =>
+      env.NODE_ENV !== "production" ||
+      env.MAIL_PROVIDER !== "console" ||
+      !env.AUTH_REQUIRE_EMAIL_VERIFICATION,
     {
       path: ["MAIL_PROVIDER"],
       message:
-        "MAIL_PROVIDER=console is refused in production: it logs emails instead " +
-        "of sending them, so verification and password-reset links never arrive. " +
-        "Set MAIL_PROVIDER=resend (and RESEND_API_KEY).",
+        "MAIL_PROVIDER=console is refused in production while email verification " +
+        "is on: it logs emails instead of sending them, so verification links never " +
+        "arrive. Set MAIL_PROVIDER=resend (and RESEND_API_KEY), or run with " +
+        "AUTH_REQUIRE_EMAIL_VERIFICATION=false.",
     }
   )
   .refine(

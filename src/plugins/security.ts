@@ -5,6 +5,7 @@ import compress from "@fastify/compress";
 import rateLimit from "@fastify/rate-limit";
 import underPressure from "@fastify/under-pressure";
 import { config } from "../config/index.ts";
+import { AppError } from "../lib/errors.ts";
 
 /**
  * Everything that used to be a stack of app.use() lines. Order still matters —
@@ -58,11 +59,17 @@ export default fp(
        * TRUST_PROXY correctly or this key is attacker-controlled.
        */
       keyGenerator: (request) => request.ip,
-      errorResponseBuilder: (request, context) => ({
-        statusCode: -1,
-        message: `Rate limit exceeded. Retry in ${context.after}.`,
-        requestId: request.id,
-      }),
+      /**
+       * An AppError, not an envelope. @fastify/rate-limit THROWS whatever this
+       * returns, so it reaches the error handler, which reads `statusCode` off
+       * it as the HTTP status. The envelope this used to return carried the
+       * house `statusCode: -1`, which became `reply.status(-1)` and turned every
+       * 429 in the API — sign-in's included — into a 500. Found 2026-09-10 by
+       * the localize suite's jobs-per-hour test, the first test that ever hit a
+       * limit. The handler renders the envelope; this only has to say 429.
+       */
+      errorResponseBuilder: (_request, context) =>
+        new AppError(`Rate limit exceeded. Retry in ${context.after}.`, 429),
     });
 
     /**
