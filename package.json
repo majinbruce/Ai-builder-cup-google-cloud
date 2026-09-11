@@ -37,7 +37,8 @@
     "pipeline": "node src/scripts/pipeline.ts",
     "spike:tts": "node src/scripts/spike-tts.ts",
     "e2e:localize": "node src/scripts/e2e-localize.ts",
-    "localize:promote-demo": "node src/scripts/promote-demo.ts"
+    "localize:promote-demo": "node src/scripts/promote-demo.ts",
+    "check:demo": "node src/scripts/check-demo.ts"
   },
   "dependencies": {
     "@fastify/compress": "^9.2.0",

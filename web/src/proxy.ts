@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { env } from "@/lib/env";
 
 /**
  * ============================================================================
@@ -59,8 +60,35 @@ function hasSessionCookie(request: NextRequest): boolean {
   );
 }
 
+/**
+ * ---------------------------------------------------------------------------
+ * `/api/*` is forwarded to Fastify from here, in every environment.
+ * ---------------------------------------------------------------------------
+ *
+ * The browser only ever calls relative paths (see next.config.ts), so SOMETHING
+ * on this origin has to hand `/api/*` to the API. On the VPS deploy that was
+ * Caddy; on Cloud Run there is no Caddy — two services, two `*.run.app`
+ * origins — and `rewrites()` in next.config.ts is evaluated at BUILD time, which
+ * would bake the API's address into the image. A rewrite returned from proxy is
+ * resolved per request against `API_ORIGIN`, read from the environment the
+ * container started in, so one image still fits every deploy.
+ *
+ * Next buffers the request body before proxy runs, and only up to
+ * `proxyClientMaxBodySize` — past that it forwards a TRUNCATED body without
+ * failing. next.config.ts raises the limit above the API's upload cap; do not
+ * lower one without the other.
+ */
+function isApiPath(pathname: string): boolean {
+  return pathname === "/api" || pathname.startsWith("/api/");
+}
+
 export function proxy(request: NextRequest): NextResponse {
   const { pathname, search } = request.nextUrl;
+
+  if (isApiPath(pathname)) {
+    return NextResponse.rewrite(new URL(`${pathname}${search}`, env.API_ORIGIN));
+  }
+
   const signedIn = hasSessionCookie(request);
 
   const isProtected = PROTECTED_PREFIXES.some(
@@ -88,14 +116,13 @@ export const config = {
   /**
    * Everything except the paths where this would be pure overhead:
    *
-   *   api        — proxied to Fastify (dev) or never reaching Next at all
-   *                (production, where Caddy routes it). Redirecting an API call
-   *                to an HTML sign-in page is how a fetch ends up parsing a
-   *                login form as JSON.
+   *   (`/api/*` IS matched — it is forwarded to Fastify above, before the
+   *   session redirects, which must never see it: redirecting an API call to
+   *   an HTML sign-in page is how a fetch ends up parsing a login form as JSON.)
    *   _next/*    — build output and the image optimiser
    *   favicon &c — static files served from /public
    */
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico|woff2?)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico|woff2?)$).*)",
   ],
 };

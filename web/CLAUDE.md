@@ -39,8 +39,11 @@ Before calling a change done: `npm run typecheck && npm run lint && npm run buil
 ## Architectural rules
 
 **1. The browser only ever calls relative paths.**
-`/api/auth/...` and `/api/v1/...`, never an absolute origin. `next.config.ts`
-rewrites them in development; Caddy routes them in production. That is what
+`/api/auth/...` and `/api/v1/...`, never an absolute origin. `src/proxy.ts`
+forwards them to `API_ORIGIN` at runtime, in development and on Cloud Run alike
+(no `rewrites()` in `next.config.ts` — those are build-time, and would bake the
+API's address into the image). `experimental.proxyClientMaxBodySize` must stay
+above the API's upload cap, or uploads arrive silently truncated. That is what
 makes the session cookie first-party and removes CORS from the picture
 entirely. Server components are the exception: `apiFetchServer` builds an
 absolute URL from `API_ORIGIN` and forwards the incoming Cookie header, which a

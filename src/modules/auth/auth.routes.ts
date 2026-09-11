@@ -70,7 +70,7 @@ const authRoutes: FastifyPluginAsyncZod = async (app) => {
    * frontend parses exactly that. Wrapping these in this codebase's
    * { statusCode, message, data } envelope would break every SDK method. This
    * is the one documented exception to the "one envelope for the whole API"
-   * rule — see the README.
+   * rule — see docs/BOILERPLATE.md.
    */
   app.route({
     method: ["GET", "POST"],

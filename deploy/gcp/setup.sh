@@ -369,8 +369,8 @@ if gcloud storage buckets describe "gs://${GCS_BUCKET}" >/dev/null 2>&1; then
   note "bucket gs://${GCS_BUCKET} already exists — reusing it"
 else
   # Uniform bucket-level access: no per-object ACLs, so the only way to reach a
-  # file is IAM or a signed URL. The API hands out signed URLs (SPEC section b),
-  # which means nothing here ever needs to be public.
+  # file is IAM. The API streams audio to the browser itself, with Range support
+  # (SPEC section b, amended in Phase 4), so nothing here ever needs to be public.
   if gcloud storage buckets create "gs://${GCS_BUCKET}" \
        --location="$GCP_REGION" \
        --uniform-bucket-level-access \
@@ -385,7 +385,10 @@ fi
 printf '\n'
 say "A lifecycle rule deleting objects after 30 days keeps a hackathon project"
 say "from quietly accruing storage cost on clips nobody will play again."
-if confirm "Add the 30-day deletion rule?"; then
+warn "Do NOT add it to the bucket production uses: the promoted /demo job's audio"
+warn "lives there, and judging runs 5 Oct - 6 Nov. A 30-day rule deletes it"
+warn "mid-judging. deploy/gcp/deploy.sh creates its own bucket with no rule."
+if confirm "Add the 30-day deletion rule (development bucket only)?"; then
   LIFECYCLE_FILE=$(mktemp)
   cat > "$LIFECYCLE_FILE" <<'JSON'
 {

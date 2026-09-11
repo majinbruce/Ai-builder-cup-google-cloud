@@ -1,0 +1,21 @@
+# What `gcloud builds submit` uploads to Cloud Build for the API image.
+#
+# Without this file gcloud falls back to .gitignore-derived rules, and
+# .dockerignore only filters what reaches the IMAGE, not what is uploaded: the
+# source tarball is stored in the project's `<project>_cloudbuild` bucket. So
+# this list is what keeps .env.development — which holds the Gemini key — out
+# of that bucket. Keep `.env*` here.
+.gcloudignore
+.git
+.gitignore
+.env
+.env.*
+node_modules/
+dist/
+coverage/
+outputs/
+logs/
+test/
+web/
+*.log
+*-service-account*.json

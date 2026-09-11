@@ -243,7 +243,30 @@ Found while building it, recorded because each would otherwise resurface:
 ## Cloud Run
 
 - Request timeout default 300 s, max 3600 s. Jobs run async; never block a request on the pipeline. https://docs.cloud.google.com/run/docs/configuring/request-timeout
-- Cannot host Postgres (no persistent disk, scale-to-zero). DB options in priority order: Cloud SQL on credits → user's US VPS with `compose.prod.yml` → Supabase.
+- Cannot host Postgres (no persistent disk, scale-to-zero). DB options in priority order: Cloud SQL on credits → user's US VPS with `compose.prod.yml` → Supabase. **Chosen 2026-09-11: Cloud SQL**, `db-f1-micro` (ENTERPRISE edition — Postgres 17 defaults to ENTERPRISE_PLUS, which has no shared-core tier), no authorized networks; Cloud Run reaches it through `--add-cloudsql-instances` at `/cloudsql/<conn>`, and the runtime SA needs `roles/cloudsql.client`. node-postgres appends `.s.PGSQL.5432` to a directory `host` itself. https://docs.cloud.google.com/sql/docs/postgres/connect-run
+
+### Phase 5 — what the deploy would have got wrong, found before it did (2026-09-11)
+
+- **Background work gets no CPU by default.** "With request-based billing, CPU is only allocated during request processing." https://docs.cloud.google.com/run/docs/configuring/billing-settings — and the pipeline runs *after* `POST /jobs` returns 202. SPEC's `min-instances=1` keeps the instance alive but does not give it CPU between polls. The API therefore deploys with `--no-cpu-throttling` (instance-based billing), which is the whole cost of the always-on API. Plus `--max-instances=1`: a job lives inside the process that accepted it, and a second instance is one Cloud Run can scale away mid-job.
+- **Next.js 16 `proxy.ts` silently truncates request bodies above 10 MB.** Per `proxyClientMaxBodySize` in Next's bundled docs, the body is buffered only up to the limit and "the request will not fail". Measured locally against a production build with the limit left at default: a 26 MiB upload the API should refuse with 413 came back **500**, and Next logged `Request body exceeded 10MB for /api/v1/localize/jobs. Only the first 10MB will be available`. With `experimental.proxyClientMaxBodySize: "27mb"`: **413**. `npm run check:demo` pins it. Same failure shape as Phase 4's `@fastify/multipart` finding — a size cap that truncates instead of refusing — one layer further out.
+- **Forwarding `/api/*` has to be runtime.** `rewrites()` in `next.config.ts` is evaluated at build time, so it could only forward to an address baked into the image. `web/src/proxy.ts` returns `NextResponse.rewrite(new URL(path, API_ORIGIN))` instead, per request, in dev and prod alike. Firebase Hosting in front of Cloud Run was not an option: it forwards only the cookie named `__session`, which would drop Better Auth's session cookie ("Only the specially-named `__session` cookie is permitted to pass through", https://firebase.google.com/docs/hosting/manage-cache).
+- **`gcloud builds submit` uploads what `.gcloudignore` allows, not what `.dockerignore` allows.** The source tarball is stored in the project's `_cloudbuild` bucket; without a `.gcloudignore` that excludes `.env*`, `.env.development` (holding the Gemini key) would have been uploaded there even though no image ever contained it. Both `.gcloudignore` files exist for that line.
+- **The setup wizard's 30-day bucket lifecycle rule would delete the demo's audio mid-judging** (5 Oct – 6 Nov). The production bucket is created by `deploy.sh` with no rule; `setup.sh` now warns.
+
+### Phase 5 — measured on the deployed stack (2026-09-11)
+
+`node src/scripts/e2e-localize.ts --base=<web> --origin=<web>` on `fixtures/sample_60s.mp3`, through the live web origin → `web/src/proxy.ts` → API → Cloud SQL, GCS, Gemini, Chirp 3 HD. asia-south1.
+
+| Item | Measured value |
+|---|---|
+| **Upload → done** | **229.9 s**: analyze 83.0 s · brief + adapt (7 segments) 128.8 s · critique 6.5 s · synthesize 6.3 s. Inside Phase 4's localhost range (215.8–237.9 s), so Cloud Run + Cloud SQL + GCS + the extra proxy hop add nothing measurable at 2 s poll granularity. The pipeline got CPU between polls: `--no-cpu-throttling` is doing its job |
+| Output | 10 model calls, 29,095 in / 7,443 out / 43,407 thinking; fidelity 95, naturalness 91, 0 retried; 9/15 emphasis claims energy-backed; 70.1 s Hindi for a 63.0 s span (+11%), 1,336 billed chars; Range 206 through the proxy; 109 polls, all schema-valid |
+| **`TRUST_PROXY` = 2, measured** | Compared the web service's Cloud Run request log (`httpRequest.remoteIp`, the caller's real IP) with Fastify's logged `req.remoteAddress` for the same request. At **1**, Fastify saw `34.96.40.141` — the web service's egress IP — for every caller, i.e. one shared rate-limit key for the whole internet (300 req / 15 min; one 4-minute job's polling is ~120). At **2**, Fastify saw the caller's real IP, matching the web log exactly. The web egress IP also changed between the two measurements (`.141` → `.185`), so a hop count, not a proxy address, is the right form of the setting |
+| **`/healthz` is unreachable from outside Cloud Run** | The front end answers it with Google's own 404 page before the container sees the request: "Some paths ending with `z`. To prevent conflicts with reserved paths, we recommend avoiding all paths that end in `z`" (https://docs.cloud.google.com/run/docs/known-issues). In-container probes bypass the front end, so the route stays; `deploy.sh`'s external smoke uses `/` |
+| `sql-component.googleapis.com` | Required by `gcloud run jobs deploy --set-cloudsql-instances` in addition to `sqladmin`. Missing, gcloud prompts; `--quiet` answers the prompt "no" and reports `Aborted by user` — the first deploy's failure |
+| Cloud Build | Web image 2 m 48 s. The builder is the classic Docker builder (`Removing intermediate container …`), so every Dockerfile stage is built, not just `runtime` |
+| Signed-out check (`check-demo.ts`) | `/demo` 200 · demo Job parses, `done` · Range 206 on source and output · 26 MiB upload through the live proxy → **413** |
+
 
 ## ADK
 
@@ -264,4 +287,4 @@ into a real tool-using loop. https://adk.dev/get-started/typescript/
 
 ## Local tooling (this machine)
 
-Node v24.14.0. `ffmpeg`, `gcloud`, `firebase` CLIs: not installed yet (Phase 0).
+Node v24.14.0. `ffmpeg` and `gcloud` installed (Phase 5 deployed from this machine); `firebase` not used.

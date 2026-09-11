@@ -1,11 +1,5 @@
 import type { NextConfig } from "next";
 
-/**
- * Where the Fastify API lives, as seen from the machine running `next dev`.
- * Only read here, and only in development — see the rewrite below.
- */
-const DEV_API_ORIGIN = process.env.API_ORIGIN ?? "http://127.0.0.1:3000";
-
 const nextConfig: NextConfig = {
   /**
    * This app lives beside the API in one repository, so there are two
@@ -42,28 +36,24 @@ const nextConfig: NextConfig = {
    *   - BETTER_AUTH_URL is the *public web* origin, so Google's redirect_uri,
    *     the verification link and the reset link all land on this app.
    *
-   * Who actually forwards `/api/*` to Fastify differs by environment:
-   *
-   *   development — this rewrite, because `next dev` (:3001) and the API
-   *                 (:3000) are two processes on two ports.
-   *   production  — Caddy, which routes `/api/*` to the api container and
-   *                 everything else here. See deploy/host/caddy/Caddyfile.
-   *
-   * The split matters: `rewrites()` is evaluated at BUILD time and baked into
-   * the routes manifest, so an API_ORIGIN baked into the image could not be
-   * changed by an env var at deploy time. Keeping the rewrite development-only
-   * means the production image has no build-time knowledge of the API's
-   * address at all — server components read API_ORIGIN at runtime instead.
+   * `src/proxy.ts` forwards `/api/*` to `API_ORIGIN`, at runtime, in development
+   * and production alike. There is deliberately no `rewrites()` here: it is
+   * evaluated at BUILD time, so it could only forward to an address baked into
+   * the image, and on Cloud Run the API is a separate service whose URL is a
+   * deploy-time fact.
    */
-  async rewrites() {
-    if (process.env.NODE_ENV === "production") return [];
-
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${DEV_API_ORIGIN}/api/:path*`,
-      },
-    ];
+  experimental: {
+    /**
+     * Next buffers each request body for proxy.ts and, past this limit,
+     * forwards a TRUNCATED body without failing (see the proxyClientMaxBodySize
+     * page in Next's docs). The default is 10 MB; the API accepts uploads up to
+     * MAX_UPLOAD_BYTES (25 MiB) plus multipart framing. Measured 2026-09-11 at
+     * the default: a 26 MiB upload that the API should have refused with 413
+     * came back 500, with Next logging "Only the first 10MB will be available".
+     * So this sits just above the API's cap, and the API's own 413 is what an
+     * oversized upload gets. `npm run check:demo` pins that.
+     */
+    proxyClientMaxBodySize: "27mb",
   },
 };
 

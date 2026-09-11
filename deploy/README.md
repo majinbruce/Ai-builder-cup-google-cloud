@@ -11,7 +11,7 @@ Two different things live under `deploy/`, and the distinction matters:
   extraction — do it before you clone this boilerplate a second time.
 
 Application deployment itself is unchanged and still lives in
-`compose.prod.yml` and the root README.
+`compose.prod.yml` and `docs/BOILERPLATE.md`.
 
 Target shape, on a 4-core / 16 GB / 200 GB box:
 
@@ -189,4 +189,4 @@ against the complexity of blue/green. If it ever stops being the right trade,
 the change is: run two api replicas with distinct aliases, put both in the
 Caddy upstream, and turn on `health_uri /health/ready` (see the note at the
 bottom of the Caddyfile for why it is off today). At that point the in-memory
-rate limiter also needs to move to Redis — see the root README.
+rate limiter also needs to move to Redis — see `docs/BOILERPLATE.md`.

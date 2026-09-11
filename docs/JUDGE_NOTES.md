@@ -384,3 +384,40 @@ product design, not a hidden number. Stage artifacts are written the moment each
 stage ends, so the learner sees the segmented, labelled transcript 55–90 s in
 while the Hindi is still being written, and the public `/demo` is a real job this
 API ran, flagged afterwards, with its telemetry intact.
+
+---
+
+## Phase 5 — Deploy, pre-compute the demo, document
+
+**"Phase 5 is hosting: two containers, a database and a bucket. Deploying a
+model-backed app is not a use of Gen AI — so what does this phase add to the
+40%, and is the Gen AI on the public URL real or a canned replay?"**
+
+It adds no model call and claims none. What it establishes is that the Gen AI a
+judge sees is the real pipeline running on Google Cloud, not a replay dressed
+up as one, and that the deployment cannot quietly degrade it. The public `/demo`
+is job `b176f8b2`, the prod e2e run itself: the fixture uploaded through the
+live web origin, analyzed from raw audio by `gemini-3.8-flash` in 83.0 s,
+adapted segment by segment in 128.8 s, blind-critiqued, voiced by Chirp 3 HD,
+**229.9 s upload to done**. It carries its own receipts: 10 model calls,
+29,095 in / 7,443 out / 43,407 thinking tokens, fidelity 95 and naturalness 91
+from a critic that never saw the rationale, and 9 of 15 emphasis claims backed
+by a measured energy rise with the 6 unbacked ones shown as such. It was
+flagged afterwards by a script, not assembled, so a judge who signs in with the
+demo account and uploads their own clip gets the same machine. The harder part
+was making sure the cloud did not break the load-bearing parts without
+announcing it, and four defaults would have done exactly that. Cloud Run gives
+an instance no CPU between requests, and the whole pipeline runs after its POST
+returns. Next's proxy truncates uploads over 10 MB and forwards the stub; the
+control run measured a 500 where a 413 belonged. A one-hop `TRUST_PROXY` put
+every visitor behind one IP, the web service's, so a few judges polling at once
+would have rate-limited each other off the demo. A 30-day bucket rule would
+have deleted the demo's audio mid-judging. Each one is now a flag with a
+measurement behind it in `docs/research.md`, and `check-demo.ts` re-proves the
+public path on demand. What this phase does not fix, and says so: 229.9 s is
+still roughly twice SPEC's 120 s budget, and the cloud is not the reason. That
+number sits inside the localhost range, and about 93% of it is the model
+thinking. The levers that would cut it change the Hindi, so they wait on a
+judgment about the Hindi, not the clock. And the demo clip's rights are still
+unrecorded (see `fixtures/README.md`), a team decision taken knowingly, not
+settled.

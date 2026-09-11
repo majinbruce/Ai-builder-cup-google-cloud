@@ -532,6 +532,20 @@ The margin comes out of the SHOULD list, which is cut before any MUST slips.
 - Record the 3-min video (designer edits), deck → PDF, README with diagram,
   public repo, submission form.
 
+**Amended 2026-09-11, Phase 5 — as deployed** (`deploy/gcp/deploy.sh`; evidence in
+`docs/research.md` § Cloud Run). Postgres is **Cloud SQL** (`db-f1-micro`, PG 17,
+socket-only), region **asia-south1**. Three departures from the bullets above:
+the API also runs `--no-cpu-throttling` and `--max-instances=1`, because Cloud
+Run's default billing gives an instance CPU only while a request is in flight
+and the job runs after its POST returns; `/api/*` is forwarded by
+`web/src/proxy.ts` at runtime rather than by a `next.config.ts` rewrite, which is
+build-time and would bake the API's URL into the image, with
+`proxyClientMaxBodySize` raised above the upload cap because Next otherwise
+truncates bodies over 10 MB without failing; and the shared demo account is an
+ordinary user created through sign-up, not `create-admin`, since an admin can
+list every user's email. Migrations and `promote-demo` run as the `localize-ops`
+Cloud Run job against the same image and env.
+
 ### SHOULD (after all MUST)
 - Per-segment regenerate button with an optional user note (~3 h).
 - Segment-synced playhead highlighting in the side-by-side view (~2 h).
@@ -553,7 +567,7 @@ The margin comes out of the SHOULD list, which is cut before any MUST slips.
 | Chirp 3 HD ignores SSML `<prosody>`/`<emphasis>` (docs conflict) | Phase 3 spike shows no audible change | Use `speaking_rate` + `[pause]` markup only (confirmed for hi-IN), or switch voice to `hi-IN-Neural2-*` which supports full SSML. |
 | Free-tier rate limit hit when a judge and the demo run together | 429 from Gemini | **Measured 2026-09-07: the free tier is 5 RPM, not the ≈10 previously assumed, and one job is 4–5 calls — so a single run nearly exhausts the minute and two concurrent runs cannot both pass.** Enabling billing (Tier 1) is therefore a submission requirement, not a precaution. Plus exponential backoff, and a pre-computed demo job that never calls Gemini. |
 | Per-call latency eats the demo budget | Pipeline exceeds ~2 min on a 90 s clip | Measured: a *trivial* call costs ~16.5 s and 209 thought tokens at default thinking. Five sequential stages start at ~80 s before audio. Levers, in order: `thinking_level: "low"` on the mechanical stages (critique, adapt retry), batch segments per call rather than per segment, and run adapt and critique on the whole transcript in one call each. Decide with real numbers at the end of Phase 2. **Measured through the API 2026-09-10 (Phase 4): 215.8–237.9 s upload-to-done over three runs on the fixture; the slowest was analyze 84.4 s, brief + adapt 136.9 s for 9 segments, critique 8.0 s, synthesis 6.1 s (was ~16 s; now 4 concurrent).** Still double the budget, and ~93% of it is analyze + adapt, where the thinking is. The remaining levers (`low` on adapt, batched adapt) change the Hindi and must be judged on it, so they are not pulled blind; the demo meanwhile runs off the pre-computed `/demo` job. |
-| Cloud Run request timeout / scale-to-zero kills a running job | Job stuck in `analyzing` | Async runner + polling already in design; `min-instances=1`; job marked `failed` on process start if older than 10 min. |
+| Cloud Run request timeout / scale-to-zero kills a running job | Job stuck in `analyzing` | Async runner + polling already in design; `min-instances=1`; job marked `failed` on process start if older than 10 min. **Amended 2026-09-11: `min-instances` alone is not enough** — under request-based billing the instance has no CPU between requests, so the API deploys with `--no-cpu-throttling`, and `--max-instances=1` so no instance holding a job is scaled away. |
 | Structured output rejects a "deeply nested" schema | 400 on `response_format` | Schemas are two levels deep by design; split Adapt into two calls if needed. |
 | No native Hindi judge on the team | — | Critique back-translation and fidelity are shown in the UI as the quality evidence; ask a Hindi-speaking colleague to review the fixture output once before recording. |
 | Postgres hosting undecided until credits confirmed | — | Three-way fallback in Phase 5; all three use the same `PG_*` env vars, so the app does not change. |
@@ -569,12 +583,12 @@ Verified against https://aibuildercup.com/Faqs.html and /themes.html on 2026-09-
 - [ ] Team registered with **2–4 members** (builder + designer); solo entries are not eligible.
 - [ ] Theme selected: **Media, Content & Digital Experiences** (there is no Education theme).
 - [ ] All code written after 7 Sept 2026 (fresh-project rule); boilerplate is a starting template, state that in the README.
-- [ ] Only Google models used for generation: `gemini-3.8-flash`, Cloud TTS Chirp 3 HD. No other AI APIs in the repo.
-- [ ] Deployed on Google Cloud: API and web on **Cloud Run**, files on GCS. Public URL works signed-out for the demo job.
+- [x] Only Google models used for generation: `gemini-3.8-flash`, Cloud TTS Chirp 3 HD. No other AI APIs in the repo. *(Verified 2026-09-11: no non-Google AI package in either package.json or source.)*
+- [x] Deployed on Google Cloud: API and web on **Cloud Run**, files on GCS. Public URL works signed-out for the demo job. *(Verified 2026-09-11: `check-demo.ts` against https://localize-web-13108575259.asia-south1.run.app, all checks passed.)*
 - [ ] Public GitHub repository; `.env.*` and service-account JSON never committed; README has setup, architecture diagram, and the doc citations.
 - [ ] Demo video **under 3 minutes**, shows a real run end-to-end plus the reasoning panel.
 - [ ] Deck exported as **PDF** (problem, differentiator, pipeline, judging map, what's next).
 - [ ] All code, comments, docs, UI copy in English.
 - [ ] Submission form completed before **4 Oct 2026** (Hack2skill platform); keep a screenshot of the confirmation.
-- [ ] Billing enabled on the GCP project so rate limits do not bite during evaluation (5 Oct – 6 Nov).
+- [x] Billing enabled on the GCP project so rate limits do not bite during evaluation (5 Oct – 6 Nov). *(Verified 2026-09-11: `billingEnabled: true`.)*
 - [ ] Credits question emailed to support+aibuildercup@hack2skill.com (FAQ does not mention credits).

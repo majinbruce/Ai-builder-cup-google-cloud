@@ -36,9 +36,11 @@ const envSchema = z.object({
   APP_URL: z.url().default("http://localhost:3001"),
 
   /**
-   * How SERVER components reach the API. Not the browser's path: in production
-   * this is the Docker network name (`http://api:3000`), which is unreachable
-   * and meaningless outside the compose network. The browser uses `/api/...`.
+   * Where the API lives, as seen from THIS server: server components fetch it
+   * directly, and src/proxy.ts forwards the browser's `/api/*` to it. On the VPS
+   * this is the Docker network name (`http://api:3000`); on Cloud Run it is the
+   * API service's `https://...run.app` URL. The browser never sees it — it only
+   * ever calls relative `/api/...` paths.
    */
   API_ORIGIN: z.url().default("http://127.0.0.1:3000"),
 

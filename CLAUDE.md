@@ -47,6 +47,10 @@ theme). Deadline 4 Oct 2026.
   `AUTH_REQUIRE_EMAIL_VERIFICATION=false`.
 - Jobs run async after the POST returns (Cloud Run request timeout is 300 s by
   default); the UI polls `GET /api/v1/localize/jobs/:id`. `min-instances=1` on the API.
+- Deploy: `bash deploy/gcp/deploy.sh` (idempotent; Cloud Run + Cloud SQL + GCS in
+  asia-south1). The API needs `--no-cpu-throttling` — without it a job gets no CPU
+  after its POST returns — and `--max-instances=1`. Prod scripts (migrate,
+  promote-demo) run as the `localize-ops` Cloud Run job, not from a laptop.
 
 ## Core pipeline (the product) — lives in `src/modules/localize/`
 1. Ingest: audio/video upload (≤ 25 MB, ≤ 180 s) → ffmpeg → 16 kHz mono mp3 in GCS.
@@ -92,7 +96,7 @@ theme). Deadline 4 Oct 2026.
 # Fastify + TypeScript + PostgreSQL boilerplate
 
 Cloned as the starting point for new projects. Keep these rules intact when
-adding features; `README.md` has the long-form reasoning behind each one.
+adding features; `docs/BOILERPLATE.md` has the long-form reasoning behind each one.
 
 Two projects live in this repository:
 

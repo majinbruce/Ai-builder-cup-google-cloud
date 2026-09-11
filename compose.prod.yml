@@ -10,7 +10,7 @@
 # connects with cannot drift apart.
 #
 # .env.production is gitignored. Create it on the server from .env.example and
-# work through the "Deploying" section of the README — four settings are
+# work through the "Deploying" section of docs/BOILERPLATE.md — four settings are
 # boot-enforced in production and the app will refuse to start without them.
 #
 # This is a SEPARATE file from docker-compose.yml rather than an override of it.

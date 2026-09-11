@@ -51,7 +51,7 @@ fail() {
   exit 1
 }
 
-[[ -f .env.production ]] || fail ".env.production not found in ${ROOT} — create it from .env.example first (see README, Deploying)"
+[[ -f .env.production ]] || fail ".env.production not found in ${ROOT} — create it from .env.example first (see docs/BOILERPLATE.md, Deploying)"
 
 log "pulling ${ROOT}"
 before="$(git rev-parse HEAD)"

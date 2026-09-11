@@ -1,0 +1,10 @@
+# What `gcloud builds submit web` uploads for the web image. See ../.gcloudignore
+# for why this exists beside .dockerignore.
+.gcloudignore
+.git
+.env
+.env.*
+node_modules/
+.next/
+out/
+*.log

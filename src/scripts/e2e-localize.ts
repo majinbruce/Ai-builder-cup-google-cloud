@@ -13,7 +13,11 @@ import { fail, out } from "./print.ts";
  * ============================================================================
  *
  *   npm run e2e:localize -- --email=e2e@local.test --password=... [clip.mp3]
- *     [--base=http://localhost:3000]
+ *     [--base=http://localhost:3000] [--origin=http://localhost:3001]
+ *
+ * Against the deployed stack, --base and --origin are both the web service's URL:
+ * the browser only ever talks to that origin, and web/src/proxy.ts forwards
+ * `/api/*` to the API, so that is the path worth testing.
  *
  * Needs a running API (`npm run dev`) and an account (`ADMIN_PASSWORD=...
  * npm run create-admin -- e2e@local.test --create` makes a verified one). Then it
@@ -40,6 +44,7 @@ const flag = (name: string): string | undefined =>
   args.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
 
 const base = flag("base") ?? `http://localhost:${config.server.port}`;
+const origin = flag("origin") ?? config.auth.frontendUrl;
 const email = flag("email") ?? "e2e@local.test";
 const password = flag("password") ?? fail("--password=<password> is required.");
 const clip = path.resolve(
@@ -64,7 +69,7 @@ if (!fs.existsSync(clip)) fail(`No clip at ${clip}.`);
 
 out();
 out("  Phase 4 end-to-end — upload -> poll -> done, over HTTP");
-out(`  api   ${base}`);
+out(`  api   ${base}  (origin ${origin})`);
 out(`  user  ${email}`);
 out(`  clip  ${path.relative(process.cwd(), clip)}`);
 out();
@@ -78,7 +83,7 @@ const signIn = await fetch(`${base}${config.auth.basePath}/sign-in/email`, {
   // Better Auth refuses a cookie-bearing request whose Origin it does not
   // trust. The frontend's origin is the trusted one, and it is what a browser
   // sends through the Next rewrite.
-  headers: { "content-type": "application/json", origin: config.auth.frontendUrl },
+  headers: { "content-type": "application/json", origin },
   body: JSON.stringify({ email, password }),
 });
 
@@ -94,7 +99,7 @@ const cookie = signIn.headers
   .map((header) => header.split(";")[0])
   .join("; ");
 
-const authed = { cookie, origin: config.auth.frontendUrl };
+const authed = { cookie, origin };
 
 /* -------------------------------------------------------------------------- */
 /* Upload                                                                     */
@@ -266,5 +271,5 @@ out(
 );
 out();
 out(`  PASS — job ${job.id}`);
-out(`  Browser: ${config.auth.frontendUrl}/localize/${job.id}`);
+out(`  Browser: ${origin}/localize/${job.id}`);
 out();

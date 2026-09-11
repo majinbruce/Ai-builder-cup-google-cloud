@@ -30,7 +30,7 @@ ffmpeg -i <source>.mp4 -vn -ac 1 -ar 16000 \
 63.1 s, 16 kHz mono, 494 KB. The `loudnorm` pass is not cosmetic: the source
 averaged −45 dB with a −28 dB peak, quiet enough that a fixed-threshold
 `silencedetect` found pauses everywhere. EBU R128 normalization preserves
-*relative* dynamics, so emphasis detection is unaffected, while making the
+_relative_ dynamics, so emphasis detection is unaffected, while making the
 absolute level sane. Lesson carried into Phase 1: the `silencedetect` threshold
 must be computed relative to the clip's own mean, never hard-coded in dB.
 
@@ -54,3 +54,13 @@ Until this is resolved the mp3 is deliberately **not committed** — see
 
 Whatever is chosen, this section must state the actual source and licence before
 the repository is made public.
+
+**Decision recorded 2026-09-11 (Phase 5).** The team chose to promote the
+production job run on this clip to the public `/demo`, so the deployed site now
+serves the clip's audio and transcript signed-out. That was a team decision
+taken with this section unresolved. The mp3 and the expected transcript stay
+uncommitted, and the source and licence above still have to be written down
+before the repository is made public. If the answer turns out to be "not
+publishable", `npm run localize:promote-demo` on a job from a team-recorded
+clip replaces the demo, which is one command (`localize-ops` job in prod, see
+the README).
