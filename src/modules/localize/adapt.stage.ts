@@ -1,6 +1,6 @@
 import { generateJson, type CallLogger, type ThinkingLevel } from "../../lib/gemini.ts";
 import { loadPrompt } from "../../lib/prompts.ts";
-import { charBudget } from "./drift.ts";
+import { charBudget, findLatinRuns } from "./drift.ts";
 import { AdaptationBrief, AdaptedSegment } from "./localize.schemas.ts";
 import type {
   Adaptation,
@@ -211,7 +211,10 @@ export async function runAdaptRetry(input: RetryInput): Promise<RetryOutput> {
           text:
             buildSegmentInput(adaptation.brief, source, segments.slice(0, position)) +
             "\n\n" +
-            formatCritiqueForRetry(critique),
+            formatCritiqueForRetry(
+              critique,
+              findLatinRuns(segments[position]?.targetText ?? "").map((run) => run.text)
+            ),
         },
       ],
       stage: "adapt_retry",
@@ -407,8 +410,16 @@ export function buildSegmentInput(
  * "you scored 62" optimizes for a higher number on the next pass, and there is
  * no next pass — this is the one revision, and what it needs is the list of
  * specific things that were wrong, not a grade to beat.
+ *
+ * `latinRuns` is the one trigger the critic did not raise: selectForRetry sends a
+ * segment back for Latin script even when every score passed. Without it here, a
+ * segment retried for that reason alone is told to "fix these things" with nothing
+ * listed, returns the same text, and fails synthesis after the retry was paid for.
  */
-export function formatCritiqueForRetry(critique: SegmentCritique): string {
+export function formatCritiqueForRetry(
+  critique: SegmentCritique,
+  latinRuns: readonly string[] = []
+): string {
   const lines: string[] = [
     "## Revision requested",
     "",
@@ -431,6 +442,14 @@ export function formatCritiqueForRetry(critique: SegmentCritique): string {
     lines.push(
       "A stressed term from the original has no counterpart that can carry the",
       "stress in your Hindi. Give it one.",
+      ""
+    );
+  }
+  if (latinRuns.length > 0) {
+    lines.push(
+      "Your Hindi contains Latin script, which the hi-IN voice cannot be trusted to",
+      `pronounce: ${latinRuns.map((run) => `"${run}"`).join(", ")}. Write every one`,
+      "of these in Devanagari. This is required, not a style note.",
       ""
     );
   }

@@ -71,5 +71,39 @@ export async function runAnalyze(input: AnalyzeInput): Promise<AnalyzeOutput> {
     ...(logger === undefined ? {} : { logger }),
   });
 
+  assertSegmentIds(analysis);
+
   return { analysis, evidence, corroboration: corroborate(analysis, evidence), call };
+}
+
+/** Short and path-safe. The prompt asks for `s01`, `s02`, …; this is the floor. */
+const SEGMENT_ID = /^[A-Za-z0-9_-]{1,32}$/;
+
+/**
+ * Segment ids are the join key for every later stage, so they are checked once,
+ * here, where the model first invents them.
+ *
+ * Not in the Zod schema: uniqueness across an array is a refinement, which JSON
+ * Schema conversion drops, so it would read as enforced for the model while only
+ * ever being enforced by the parse. A duplicate id makes adapt, critique and
+ * synthesis each pick "the first match" and pair the wrong texts without failing.
+ */
+export function assertSegmentIds(analysis: Analysis): void {
+  const seen = new Set<string>();
+
+  for (const segment of analysis.segments) {
+    if (!SEGMENT_ID.test(segment.id)) {
+      throw new Error(
+        `Analyze returned segment id ${JSON.stringify(segment.id)}, which is not a ` +
+          "short alphanumeric id. Ids are join keys; refusing to carry it forward."
+      );
+    }
+    if (seen.has(segment.id)) {
+      throw new Error(
+        `Analyze returned segment id "${segment.id}" more than once. Ids are the join ` +
+          "between analysis, adaptation, critique and synthesis, so they must be unique."
+      );
+    }
+    seen.add(segment.id);
+  }
 }

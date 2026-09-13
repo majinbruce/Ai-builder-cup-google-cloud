@@ -14,7 +14,11 @@ import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { buildApp } from "./app.ts";
 import { config } from "./config/index.ts";
-import { failStaleJobs } from "./modules/localize/localize.service.ts";
+import {
+  failRunningJobs,
+  failStaleJobs,
+  REAP_INTERVAL_MS,
+} from "./modules/localize/localize.service.ts";
 
 const app = await buildApp();
 
@@ -38,6 +42,9 @@ try {
  * process dies even if a socket refuses to.
  */
 let shuttingDown = false;
+
+/** The orphan reaper's timer, started after listen and stopped on shutdown. */
+let reaper: NodeJS.Timeout | undefined;
 
 /**
  * `exitCode` is what a clean shutdown exits with: 0 for a signal, 1 when the
@@ -86,6 +93,16 @@ const shutdown = async (signal: string, exitCode = 0) => {
       await sleep(config.server.shutdownDrainMs);
     }
 
+    clearInterval(reaper);
+
+    // Before close, while the pool is still open. app.close() waits for
+    // requests, not for localize jobs running after their POST returned, so
+    // whatever is still running dies with this process — say so on the rows now,
+    // rather than leaving owners polling until the reaper notices.
+    await failRunningJobs({ db: app.db, log: app.log }).catch((err: unknown) => {
+      app.log.error({ err }, "could not mark running localize jobs failed");
+    });
+
     await app.close();
     await flushSentry();
     process.exit(exitCode);
@@ -130,12 +147,21 @@ try {
 }
 
 /**
- * Localization jobs run in-process, so a job that was mid-pipeline when the last
+ * Localization jobs run in-process, so a job that was mid-pipeline when a
  * process died will never finish on its own (SPEC section g). Reaped here rather
  * than in an onReady hook because the unit suite builds the app with no
- * database; and after listen, because a failure to reap is worth a log line and
- * not worth refusing traffic over.
+ * database; after listen, because a failure to reap is worth a log line and not
+ * worth refusing traffic over; and then on a timer, because a job killed moments
+ * before this boot is not stale yet (see failStaleJobs).
  */
-await failStaleJobs({ db: app.db, log: app.log }).catch((err: unknown) => {
-  app.log.error({ err }, "could not reap orphaned localize jobs");
-});
+const reap = () =>
+  failStaleJobs({ db: app.db, log: app.log }).catch((err: unknown) => {
+    app.log.error({ err }, "could not reap orphaned localize jobs");
+  });
+
+await reap();
+
+if (!shuttingDown) {
+  reaper = setInterval(() => void reap(), REAP_INTERVAL_MS);
+  reaper.unref();
+}

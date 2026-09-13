@@ -9,8 +9,16 @@ import { buildTestApp } from "../helpers.ts";
 import { createFakeMailer, type FakeMailer } from "../helpers/mailer.ts";
 import { registerAndSignIn, type TestIdentity } from "../helpers/auth.ts";
 import type { App } from "../../src/app.ts";
+import { eq, inArray } from "drizzle-orm";
+import { localizeJobs } from "../../src/db/schema.ts";
+import * as repo from "../../src/modules/localize/localize.repository.ts";
 import { setDemo } from "../../src/modules/localize/localize.repository.ts";
-import type { Stages } from "../../src/modules/localize/localize.service.ts";
+import {
+  failRunningJobs,
+  failStaleJobs,
+  STALE_JOB_MS,
+  type Stages,
+} from "../../src/modules/localize/localize.service.ts";
 import {
   AcousticEvidence,
   Analysis,
@@ -57,8 +65,15 @@ const call = (stage: ModelCallStage): ModelCall => ({
   latencyMs: 1,
 });
 
-/** Mutable per test: which stage throws, and which segments the critic fails. */
-const behaviour = { throwIn: null as keyof Stages | null, failIds: [] as string[] };
+/**
+ * Mutable per test: which stage throws, which segments the critic fails, and an
+ * optional gate analyze waits on — how a test holds a job mid-run.
+ */
+const behaviour = {
+  throwIn: null as keyof Stages | null,
+  failIds: [] as string[],
+  analyzeGate: null as Promise<void> | null,
+};
 
 const adaptationFor = (marker: string): Adaptation => ({
   targetLanguage: "hi",
@@ -88,6 +103,7 @@ const guard = (stage: keyof Stages) => {
 const stages: Stages = {
   analyze: async () => {
     guard("analyze");
+    await behaviour.analyzeGate;
     return { analysis, evidence, corroboration, call: call("analyze") };
   },
   brief: async () => {
@@ -213,6 +229,13 @@ describe("localize job lifecycle", () => {
    */
   const newUser = () => registerAndSignIn(app, mailer);
 
+  /**
+   * One account for the recovery tests below, which start four jobs between them
+   * — under the budget — and would otherwise spend four more sign-ups.
+   */
+  let sharedUser: TestIdentity | null = null;
+  const recoveryUser = async () => (sharedUser ??= await newUser());
+
   const upload = async (who: TestIdentity, bytes: Buffer, mimeType = "audio/mpeg") => {
     const body = multipart(bytes, mimeType);
     const res = await app.inject({
@@ -232,7 +255,14 @@ describe("localize job lifecycle", () => {
       headers: { cookie: who.cookie },
     });
 
-  /** Polls until the job settles, collecting every status it was seen in. */
+  /**
+   * Polls until the job settles, collecting every status it was seen in.
+   *
+   * Every poll counts against the global per-IP limiter (RATE_LIMIT_MAX, shared
+   * by the whole file since inject always comes from one address), so the
+   * interval is 50 ms, not 10: at 10 ms this file alone crossed the limit and
+   * sign-ups late in it started failing with 429.
+   */
   const settle = async (who: TestIdentity, id: string) => {
     const seen: string[] = [];
     for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -243,7 +273,7 @@ describe("localize job lifecycle", () => {
       if (parsed.status === "done" || parsed.status === "failed") {
         return { job: parsed, seen };
       }
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
     throw new Error(`job ${id} never settled`);
   };
@@ -500,7 +530,8 @@ describe("localize job lifecycle", () => {
     // A different user has their own budget.
     const other = await registerAndSignIn(app, mailer);
     expect((await upload(other, fixtureBytes)).statusCode).toBe(202);
-  });
+    // Seven real ffmpeg ingests; the 5 s default timed this out on a slow disk.
+  }, 30_000);
 
   it("serves a promoted demo job signed-out, and nothing before one exists", async () => {
     const owner = await newUser();
@@ -532,5 +563,131 @@ describe("localize job lifecycle", () => {
 
     expect(job.status).toBe("failed");
     expect(await setDemo(app.db, job.id)).toBe(false);
+  });
+
+  it("replaces the previous demo when another job is promoted", async () => {
+    const owner = await recoveryUser();
+    const first = (
+      await settle(
+        owner,
+        (await upload(owner, fixtureBytes)).json<{ data: Job }>().data.id
+      )
+    ).job;
+    const second = (
+      await settle(
+        owner,
+        (await upload(owner, fixtureBytes)).json<{ data: Job }>().data.id
+      )
+    ).job;
+
+    // The later-finished job first, then the earlier one: before the fix the
+    // earlier one stayed hidden behind the newer updated_at.
+    expect(await setDemo(app.db, second.id)).toBe(true);
+    expect(await setDemo(app.db, first.id)).toBe(true);
+
+    const demo = await app.inject({ method: "GET", url: "/api/v1/localize/demo" });
+    expect(Job.parse(demo.json<{ data: unknown }>().data).id).toBe(first.id);
+
+    const audio = await app.inject({
+      method: "GET",
+      url: "/api/v1/localize/demo/audio/output",
+    });
+    expect(audio.headers["cache-control"]).toBe("no-cache");
+  });
+
+  it("does not count refused uploads against the hourly job budget", async () => {
+    const busy = await registerAndSignIn(app, mailer);
+    const statuses: number[] = [];
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      statuses.push((await upload(busy, Buffer.from("not audio"))).statusCode);
+    }
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      statuses.push((await upload(busy, fixtureBytes)).statusCode);
+    }
+
+    expect(statuses).toEqual([400, 400, 400, 202, 202, 202, 202, 202, 429]);
+  }, 30_000);
+
+  it("reaps a job orphaned by a dead process, but not a fresh one", async () => {
+    const owner = await recoveryUser();
+    const insertOrphan = async (updatedAt: Date) => {
+      const row = await repo.insert(app.db, {
+        id: randomUUID(),
+        userId: owner.userId,
+        targetLanguage: "hi",
+        sourceUri: path.resolve("outputs", "storage", "jobs", "none", "source.mp3"),
+      });
+      await app.db
+        .update(localizeJobs)
+        .set({ status: "adapting", updatedAt })
+        .where(eq(localizeJobs.id, row.id));
+      return row.id;
+    };
+
+    const stale = await insertOrphan(new Date(Date.now() - STALE_JOB_MS - 60_000));
+    const fresh = await insertOrphan(new Date());
+
+    await failStaleJobs({ db: app.db, log: app.log });
+
+    expect((await repo.findById(app.db, stale))?.status).toBe("failed");
+    expect((await repo.findById(app.db, fresh))?.status).toBe("adapting");
+
+    // Hand-inserted rows still count against the shared account's hourly budget.
+    await app.db.delete(localizeJobs).where(inArray(localizeJobs.id, [stale, fresh]));
+  });
+
+  it("fails running jobs on shutdown, and a later stage write cannot revive them", async () => {
+    const owner = await recoveryUser();
+    let release = () => {};
+    behaviour.analyzeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    try {
+      const id = (await upload(owner, fixtureBytes)).json<{ data: Job }>().data.id;
+
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const polled = Job.parse(
+          (await getJob(owner, id)).json<{ data: unknown }>().data
+        );
+        if (polled.status === "analyzing") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      await failRunningJobs({ db: app.db, log: app.log });
+      release();
+
+      const { job } = await settle(owner, id);
+      // Give the released run time to attempt its next writes.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const after = Job.parse((await getJob(owner, id)).json<{ data: unknown }>().data);
+
+      expect(job.status).toBe("failed");
+      expect(after.status).toBe("failed");
+      expect(after.error).toMatch(/server restarted/);
+    } finally {
+      release();
+      behaviour.analyzeGate = null;
+    }
+  });
+
+  it("still lists jobs when one row's analysis no longer parses", async () => {
+    const owner = await recoveryUser();
+    const id = (await upload(owner, fixtureBytes)).json<{ data: Job }>().data.id;
+    await settle(owner, id);
+    await app.db
+      .update(localizeJobs)
+      .set({ analysis: { written: "by an older build" } })
+      .where(eq(localizeJobs.id, id));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/localize/jobs",
+      headers: { cookie: owner.cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ data: { topic: string | null }[] }>().data[0]?.topic).toBeNull();
   });
 });

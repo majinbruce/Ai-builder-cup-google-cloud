@@ -13,6 +13,7 @@ import {
   formatTimestamp,
   markProminence,
 } from "../src/modules/localize/acoustics.ts";
+import { assertSegmentIds } from "../src/modules/localize/analyze.stage.ts";
 import { corroborate } from "../src/modules/localize/corroborate.ts";
 import {
   Analysis,
@@ -377,4 +378,34 @@ describe("the saved fixture output", () => {
       expect(parsed.segments.length).toBeGreaterThan(0);
     }
   );
+});
+
+describe("segment ids from the model", () => {
+  const withIds = (...ids: string[]): Analysis => {
+    const base = Analysis.parse(
+      (
+        JSON.parse(fs.readFileSync("fixtures/analysis.expected.json", "utf8")) as {
+          analysis: unknown;
+        }
+      ).analysis
+    );
+    const template = base.segments[0];
+    if (template === undefined) throw new Error("fixture has no segments");
+    return { ...base, segments: ids.map((id) => ({ ...template, id })) };
+  };
+
+  it("accepts unique short ids", () => {
+    expect(() => assertSegmentIds(withIds("s01", "s02", "s03"))).not.toThrow();
+  });
+
+  /** Every later stage joins on the id; a duplicate pairs the wrong texts silently. */
+  it("refuses a duplicate id", () => {
+    expect(() => assertSegmentIds(withIds("s01", "s02", "s01"))).toThrow(
+      /more than once/
+    );
+  });
+
+  it("refuses an id that is not a short alphanumeric token", () => {
+    expect(() => assertSegmentIds(withIds("s01", "../s02"))).toThrow(/not a short/);
+  });
 });

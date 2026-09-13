@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, lt, ne, notInArray, sql } from "drizzle-orm";
 import type { Database } from "../../plugins/db.ts";
 import { localizeJobs, type LocalizeJobRow } from "../../db/schema.ts";
 import {
@@ -128,7 +128,14 @@ export const listForUser = async (
   };
 };
 
-/** Writes whatever a stage produced, plus the next status, in one UPDATE. */
+/**
+ * Writes whatever a stage produced, plus the next status, in one UPDATE.
+ *
+ * Never onto a failed row. A job can be marked failed from outside its own run —
+ * by shutdown, or by the reaper — while the run is still going; without this
+ * guard its next stage write would quietly move it back to "adapting", and the
+ * UI would poll a job that no process is running.
+ */
 export const updateStage = async (
   db: Database,
   id: string,
@@ -137,7 +144,21 @@ export const updateStage = async (
   await db
     .update(localizeJobs)
     .set({ ...write, updatedAt: new Date() })
-    .where(eq(localizeJobs.id, id));
+    .where(and(eq(localizeJobs.id, id), ne(localizeJobs.status, "failed")));
+};
+
+/** How many jobs a user has started since `since`, whatever became of them. */
+export const countCreatedSince = async (
+  db: Database,
+  userId: string,
+  since: Date
+): Promise<number> => {
+  const [row] = await db
+    .select({ total: count() })
+    .from(localizeJobs)
+    .where(and(eq(localizeJobs.userId, userId), gte(localizeJobs.createdAt, since)));
+
+  return row?.total ?? 0;
 };
 
 export const markFailed = async (
@@ -161,40 +182,83 @@ const IN_FLIGHT: JobStatus[] = [
   "synthesizing",
 ];
 
+const RESTARTED_ERROR =
+  "The server restarted while this job was running, and jobs run in-process. " +
+  "Upload the clip again.";
+
 /**
- * Fails every in-flight job not touched since `before`.
+ * Fails every in-flight job not touched since `before`, except `running`.
  *
  * Keyed on `updated_at`, not `created_at`: every stage bumps it, so a job that
  * is slow but alive keeps refreshing its own timestamp, and only one whose
- * process is gone stops. Returns the ids so the boot log can name them.
+ * process is gone stops. `running` is this process's own live jobs, which are
+ * alive by definition however slow a stage is. Returns the ids so the log can
+ * name them.
  */
-export const failStale = async (db: Database, before: Date): Promise<string[]> => {
+export const failStale = async (
+  db: Database,
+  before: Date,
+  running: readonly string[] = []
+): Promise<string[]> => {
   const rows = await db
     .update(localizeJobs)
-    .set({
-      status: "failed",
-      error:
-        "The server restarted while this job was running, and jobs run in-process. " +
-        "Upload the clip again.",
-      updatedAt: new Date(),
-    })
+    .set({ status: "failed", error: RESTARTED_ERROR, updatedAt: new Date() })
     .where(
-      and(inArray(localizeJobs.status, IN_FLIGHT), lt(localizeJobs.updatedAt, before))
+      and(
+        inArray(localizeJobs.status, IN_FLIGHT),
+        lt(localizeJobs.updatedAt, before),
+        running.length > 0 ? notInArray(localizeJobs.id, [...running]) : undefined
+      )
     )
     .returning({ id: localizeJobs.id });
 
   return rows.map((row) => row.id);
 };
 
-export const setDemo = async (db: Database, id: string): Promise<boolean> => {
+/** Fails the given jobs if still in flight. For shutdown, which is about to kill them. */
+export const failInFlight = async (
+  db: Database,
+  ids: readonly string[]
+): Promise<string[]> => {
+  if (ids.length === 0) return [];
+
   const rows = await db
     .update(localizeJobs)
-    .set({ isDemo: true })
-    .where(and(eq(localizeJobs.id, id), eq(localizeJobs.status, "done")))
+    .set({ status: "failed", error: RESTARTED_ERROR, updatedAt: new Date() })
+    .where(
+      and(inArray(localizeJobs.id, [...ids]), inArray(localizeJobs.status, IN_FLIGHT))
+    )
     .returning({ id: localizeJobs.id });
 
-  return rows.length > 0;
+  return rows.map((row) => row.id);
 };
+
+/**
+ * Makes `id` THE demo, if it is done: flags it and unflags every other job, in
+ * one transaction.
+ *
+ * Unflagging is the point. findDemo serves the newest flagged row by
+ * updated_at, and promotion does not make a job newer — so without it, promoting
+ * a job that finished before the current demo would report success and change
+ * nothing on the public page.
+ */
+export const setDemo = async (db: Database, id: string): Promise<boolean> =>
+  db.transaction(async (tx) => {
+    const rows = await tx
+      .update(localizeJobs)
+      .set({ isDemo: true })
+      .where(and(eq(localizeJobs.id, id), eq(localizeJobs.status, "done")))
+      .returning({ id: localizeJobs.id });
+
+    if (rows.length === 0) return false;
+
+    await tx
+      .update(localizeJobs)
+      .set({ isDemo: false })
+      .where(and(eq(localizeJobs.isDemo, true), ne(localizeJobs.id, id)));
+
+    return true;
+  });
 
 const nullable = <T extends z.ZodType>(schema: T, value: unknown): z.infer<T> | null =>
   value === null ? null : schema.parse(value);
@@ -216,8 +280,21 @@ export const toDto = (row: LocalizeJobRow): Job => ({
   updatedAt: row.updatedAt.toISOString(),
 });
 
+/**
+ * Just the two fields the list shows, read leniently.
+ *
+ * Deliberately not the full Analysis parse toDto does: the list is how a user
+ * reaches every job, so one row an older build wrote must not turn it into a
+ * 500. That row still fails loudly when opened, where the field gets named.
+ */
+const SummaryFields = z.object({
+  topic: z.string(),
+  segments: z.array(z.unknown()),
+});
+
 export const toSummary = (row: LocalizeJobRow): JobSummary => {
-  const analysis = nullable(Analysis, row.analysis);
+  const parsed = SummaryFields.safeParse(row.analysis);
+  const analysis = parsed.success ? parsed.data : null;
 
   return {
     id: row.id,

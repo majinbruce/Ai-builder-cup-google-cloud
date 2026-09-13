@@ -57,8 +57,12 @@ import {
  * exception, which is the shape that leaks.
  */
 
-/** SPEC section g: a per-user budget, so one account cannot run up the bill. */
-const JOBS_PER_HOUR = 5;
+/**
+ * Uploads per user per hour, successful or not. Each one runs ffmpeg over up to
+ * 25 MB, so refused uploads need a cap too. The real budget — jobs, which cost
+ * model calls — is localizeService.JOBS_PER_HOUR, counted from the table.
+ */
+const UPLOADS_PER_HOUR = 20;
 
 const ACCEPTED_TYPES = /^(audio\/[\w.+-]+|video\/mp4)$/;
 
@@ -81,7 +85,8 @@ export interface LocalizeRoutesOptions {
 async function sendAudio(
   request: FastifyRequest,
   reply: FastifyReply,
-  uri: string
+  uri: string,
+  cacheControl = "private, max-age=3600"
 ): Promise<FastifyReply> {
   const size = await fileSize(uri);
   const range = parseRangeHeader(request.headers.range, size);
@@ -89,10 +94,10 @@ async function sendAudio(
   reply
     .header("accept-ranges", "bytes")
     .header("content-type", "audio/mpeg")
-    // Private: every one of these is behind a session except the demo, and a
-    // shared cache keyed without the cookie would serve one user's lecture to
-    // another.
-    .header("cache-control", "private, max-age=3600");
+    // Private by default: every one of these is behind a session except the
+    // demo, and a shared cache keyed without the cookie would serve one user's
+    // lecture to another.
+    .header("cache-control", cacheControl);
 
   if (range === null) {
     return reply.code(416).header("content-range", `bytes */${size}`).send();
@@ -139,7 +144,7 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
     {
       config: {
         rateLimit: {
-          max: JOBS_PER_HOUR,
+          max: UPLOADS_PER_HOUR,
           timeWindow: "1 hour",
           // Runs after this scope's requireAuth hook — route-level hooks always
           // follow instance-level ones — so request.user is set here, unlike
@@ -165,6 +170,8 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
     },
     async (request, reply) => {
       const user = requireUser(request);
+
+      await localizeService.assertJobBudget({ db: app.db, log: request.log }, user.id);
 
       if (!request.isMultipart()) {
         throw new AppError("Upload the clip as multipart/form-data.", 415);
@@ -330,7 +337,10 @@ const publicDemoRoutes: FastifyPluginAsyncZod = async (app) => {
       return sendAudio(
         request,
         reply,
-        localizeService.audioUriFor(job, request.params.which)
+        localizeService.audioUriFor(job, request.params.which),
+        // Not cached: the URL stays the same when a different job is promoted,
+        // and an hour-long max-age would keep playing the previous demo's audio.
+        "no-cache"
       );
     }
   );

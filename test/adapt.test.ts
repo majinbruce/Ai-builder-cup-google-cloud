@@ -6,6 +6,7 @@ import {
   formatCritiqueForRetry,
 } from "../src/modules/localize/adapt.stage.ts";
 import {
+  assertCritiqueMatchesPairs,
   buildCritiqueInput,
   CRITIQUE_THINKING_LEVEL,
   formatPairsForCritique,
@@ -312,6 +313,55 @@ describe("the retry gate", () => {
   });
 });
 
+describe("the critique's coverage of the segments", () => {
+  const pairs = buildCritiqueInput(
+    analysis([analyzedSegment({ id: "s01" }), analyzedSegment({ id: "s02" })]),
+    adaptation([adaptedSegment({ id: "s01" }), adaptedSegment({ id: "s02" })])
+  );
+
+  it("accepts every segment scored exactly once", () => {
+    expect(() =>
+      assertCritiqueMatchesPairs(
+        pairs,
+        critique([segmentCritique({ id: "s01" }), segmentCritique({ id: "s02" })])
+      )
+    ).not.toThrow();
+  });
+
+  it("refuses a missing segment", () => {
+    expect(() =>
+      assertCritiqueMatchesPairs(pairs, critique([segmentCritique({ id: "s01" })]))
+    ).toThrow(/did not score s02/);
+  });
+
+  /** A duplicate would be re-adapted twice, breaking the retry-once bound. */
+  it("refuses a segment scored twice", () => {
+    expect(() =>
+      assertCritiqueMatchesPairs(
+        pairs,
+        critique([
+          segmentCritique({ id: "s01", fidelity: 40 }),
+          segmentCritique({ id: "s01", fidelity: 40 }),
+          segmentCritique({ id: "s02" }),
+        ])
+      )
+    ).toThrow(/scored s01 more than once/);
+  });
+
+  it("refuses a score for a segment that was never asked about", () => {
+    expect(() =>
+      assertCritiqueMatchesPairs(
+        pairs,
+        critique([
+          segmentCritique({ id: "s01" }),
+          segmentCritique({ id: "s02" }),
+          segmentCritique({ id: "s99" }),
+        ])
+      )
+    ).toThrow(/unknown segment\(s\) s99/);
+  });
+});
+
 describe("the Devanagari-only guard", () => {
   it("flags a Latin-script technical term left in the TTS string", () => {
     expect(findLatinRuns("यह एक closure है।")).toEqual([{ text: "closure", index: 6 }]);
@@ -485,6 +535,22 @@ describe("what each call is shown", () => {
     const text = formatCritiqueForRetry(segmentCritique({ signalPreserved: false }));
 
     expect(text).toContain("did NOT survive");
+  });
+
+  /**
+   * Latin script is a retry trigger the critic never raises, so a segment can be
+   * sent back with a clean critique. The runs have to be in the payload, or the
+   * model is asked to fix nothing and returns the same text.
+   */
+  it("names the Latin-script runs when that is why the segment came back", () => {
+    const text = formatCritiqueForRetry(segmentCritique(), ["closure", "callback"]);
+
+    expect(text).toContain('"closure", "callback"');
+    expect(text).toContain("Devanagari");
+  });
+
+  it("says nothing about script when there is no Latin in the Hindi", () => {
+    expect(formatCritiqueForRetry(segmentCritique())).not.toContain("Latin script");
   });
 });
 

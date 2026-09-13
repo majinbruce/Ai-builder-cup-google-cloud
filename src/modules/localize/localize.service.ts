@@ -5,7 +5,7 @@ import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
 import { config } from "../../config/index.ts";
 import type { Database } from "../../plugins/db.ts";
-import { badRequest, notFound } from "../../lib/errors.ts";
+import { AppError, badRequest, notFound } from "../../lib/errors.ts";
 import { encodeMp3, measureMeanVolumeDb, probeDurationSec } from "../../lib/ffmpeg.ts";
 import { downloadFile, jobKey, putFile } from "../../lib/storage.ts";
 import { runAdapt, runAdaptRetry, runBrief, TARGET_LANGUAGE } from "./adapt.stage.ts";
@@ -83,6 +83,27 @@ const SILENCE_FLOOR_DB = -60;
 /** A job untouched for this long while in flight belongs to a dead process. */
 export const STALE_JOB_MS = 10 * 60 * 1000;
 
+/** How often a live process looks for orphans, not only at boot. */
+export const REAP_INTERVAL_MS = 60 * 1000;
+
+/**
+ * SPEC section g: a per-user budget, so one account cannot run up the bill.
+ *
+ * Counted from the table, not by the rate limiter: only uploads that became a
+ * job cost model calls, so a clip refused as silent or too long must not use up
+ * the hour. The route keeps a looser limiter in front for the ingest CPU.
+ */
+export const JOBS_PER_HOUR = 5;
+
+/**
+ * Ids of the jobs this process is running right now.
+ *
+ * What lets the reaper run on a timer: a job in this set is alive however long
+ * its current stage takes, and shutdown knows exactly which rows it is about to
+ * abandon.
+ */
+const runningJobs = new Set<string>();
+
 /** The error text a failed job shows, capped so a stack of model output cannot fill the row. */
 const MAX_ERROR_CHARS = 1_000;
 
@@ -112,6 +133,25 @@ export interface CreateJobOutput {
  * nothing is lost and inline base64 stays under the 20 MB request cap), checks
  * the length and level against the caps, stores the result, and inserts the row.
  */
+/**
+ * Refuses a user who has already started JOBS_PER_HOUR jobs this hour.
+ *
+ * Called before the upload is read, so a refused user does not stream 25 MB
+ * first. Two uploads racing past the check together can both succeed; with a
+ * budget of five that is an overshoot of one, not a way around it.
+ */
+export async function assertJobBudget(ctx: Ctx, userId: string): Promise<void> {
+  const since = new Date(Date.now() - 60 * 60 * 1000);
+  const started = await repo.countCreatedSince(ctx.db, userId, since);
+
+  if (started >= JOBS_PER_HOUR) {
+    throw new AppError(
+      `You have started ${started} jobs in the last hour; the limit is ${JOBS_PER_HOUR}.`,
+      429
+    );
+  }
+}
+
 export async function createJobFromUpload(
   ctx: Ctx,
   input: CreateJobInput
@@ -201,6 +241,8 @@ export async function runJob(deps: RunDeps, jobId: string): Promise<void> {
   // rejection, which server.ts treats as fatal — one bad job would take the
   // whole API down with it.
   let workDir: string | null = null;
+
+  runningJobs.add(jobId);
 
   try {
     workDir = await fsp.mkdtemp(path.join(os.tmpdir(), `localize-job-${jobId}-`));
@@ -330,14 +372,15 @@ export async function runJob(deps: RunDeps, jobId: string): Promise<void> {
     log.error({ err, elapsedMs: elapsedMs() }, "localize job failed");
 
     // A failure to record the failure is logged and swallowed: the job row
-    // then sits in flight until failStaleJobs() reaps it on the next boot,
-    // which is the same recovery path as a crash.
+    // then sits in flight until failStaleJobs() reaps it, which is the same
+    // recovery path as a crash.
     await repo
       .markFailed(db, jobId, message.slice(0, MAX_ERROR_CHARS))
       .catch((markErr: unknown) => {
         log.error({ err: markErr }, "could not mark localize job failed");
       });
   } finally {
+    runningJobs.delete(jobId);
     if (workDir !== null) {
       await fsp.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -390,14 +433,32 @@ export function audioUriFor(job: Job, which: AudioWhich): string {
 }
 
 /**
- * Boot-time recovery, per SPEC section g: jobs run in-process, so one that was
- * in flight when its process died will never finish. Called from server.ts after
- * listen rather than from a hook, because the unit suite boots the app with no
- * database behind it.
+ * Orphan recovery, per SPEC section g: jobs run in-process, so one that was in
+ * flight when its process died will never finish.
+ *
+ * Run at boot AND on a timer (server.ts). Boot alone is not enough: a job killed
+ * a minute into its run is only a minute stale when the next process boots, so
+ * a boot-only check skips it and nothing ever looks again — its owner's page
+ * polls forever. This process's own running jobs are excluded, so the timer
+ * cannot fail a job that is merely slow.
  */
 export async function failStaleJobs(ctx: Ctx): Promise<void> {
-  const ids = await repo.failStale(ctx.db, new Date(Date.now() - STALE_JOB_MS));
+  const ids = await repo.failStale(ctx.db, new Date(Date.now() - STALE_JOB_MS), [
+    ...runningJobs,
+  ]);
   if (ids.length > 0) {
     ctx.log.warn({ jobIds: ids }, "marked orphaned localize jobs failed");
+  }
+}
+
+/**
+ * Shutdown: fails every job this process is still running, because exiting is
+ * about to kill them. Called while the database is still open, so the rows say
+ * "failed" at once instead of waiting STALE_JOB_MS for the reaper.
+ */
+export async function failRunningJobs(ctx: Ctx): Promise<void> {
+  const ids = await repo.failInFlight(ctx.db, [...runningJobs]);
+  if (ids.length > 0) {
+    ctx.log.warn({ jobIds: ids }, "shutting down: marked running localize jobs failed");
   }
 }

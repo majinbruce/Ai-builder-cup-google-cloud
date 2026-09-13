@@ -168,22 +168,52 @@ export async function runCritique(input: CritiqueInput): Promise<CritiqueOutput>
     ...(logger === undefined ? {} : { logger }),
   });
 
-  const missing = pairs
-    .filter((pair) => !critique.segments.some((scored) => scored.id === pair.id))
-    .map((pair) => pair.id);
-
-  if (missing.length > 0) {
-    // An unscored segment is not a gap in a report, it is a segment that
-    // silently skips the retry gate. The overall scores would also be computed
-    // over a set the reader thinks is complete.
-    throw new Error(
-      `Critique did not score ${missing.length} segment(s): ${missing.join(", ")}. ` +
-        "Every segment must be scored or the retry gate and the overall scores are " +
-        "both computed over an incomplete set."
-    );
-  }
+  assertCritiqueMatchesPairs(pairs, critique);
 
   return { critique, call };
+}
+
+/**
+ * Every pair scored exactly once, and nothing scored that was not asked about.
+ *
+ * selectForRetry walks `critique.segments` as the model returned them, so each
+ * way this can go wrong has a concrete cost downstream:
+ *
+ *   - missing: the segment silently skips the retry gate, and the overall scores
+ *     are computed over a set the reader thinks is complete.
+ *   - duplicated: the segment is re-adapted twice, which breaks the ONCE bound of
+ *     SPEC section b and bills a second call.
+ *   - unknown: runAdaptRetry throws on it, failing the job after the critique
+ *     was already paid for — better to fail here, naming the actual cause.
+ */
+export function assertCritiqueMatchesPairs(
+  pairs: readonly CritiquePair[],
+  critique: Critique
+): void {
+  const expected = new Set(pairs.map((pair) => pair.id));
+  const seen = new Set<string>();
+  const duplicated = new Set<string>();
+  const unknown: string[] = [];
+
+  for (const scored of critique.segments) {
+    if (!expected.has(scored.id)) unknown.push(scored.id);
+    else if (seen.has(scored.id)) duplicated.add(scored.id);
+    seen.add(scored.id);
+  }
+
+  const missing = [...expected].filter((id) => !seen.has(id));
+  const problems = [
+    missing.length > 0 ? `did not score ${missing.join(", ")}` : null,
+    duplicated.size > 0 ? `scored ${[...duplicated].join(", ")} more than once` : null,
+    unknown.length > 0 ? `scored unknown segment(s) ${unknown.join(", ")}` : null,
+  ].filter((problem) => problem !== null);
+
+  if (problems.length > 0) {
+    throw new Error(
+      `Critique ${problems.join("; ")}. Every segment must be scored exactly once, ` +
+        "or the retry gate and the overall scores are computed over the wrong set."
+    );
+  }
 }
 
 /** Why a segment is being sent back, in the words the UI shows. */

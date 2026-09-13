@@ -230,11 +230,20 @@ async function mapBounded<T, R>(
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
+  // Set by the first failure. Promise.all rejects at once, but without this the
+  // other workers would keep starting (and billing) calls for a run that has
+  // already failed, writing into a scratch dir the caller is deleting.
+  let failed = false;
 
   const worker = async () => {
-    while (next < items.length) {
+    while (!failed && next < items.length) {
       const index = next++;
-      results[index] = await task(items[index] as T, index);
+      try {
+        results[index] = await task(items[index] as T, index);
+      } catch (err) {
+        failed = true;
+        throw err;
+      }
     }
   };
 
@@ -314,7 +323,9 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
       speakingRate: built.speakingRate,
     });
 
-    const file = path.join(segmentDir, `${adapted.id}.wav`);
+    // Named by position, not by id: the id came from the model, and a file name
+    // built from it is one duplicate away from overwriting another segment.
+    const file = path.join(segmentDir, `${String(index).padStart(3, "0")}.wav`);
     fs.writeFileSync(file, result.audio);
 
     const segment: SynthesizedSegment = {
