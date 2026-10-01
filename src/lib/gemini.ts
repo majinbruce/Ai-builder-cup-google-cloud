@@ -44,6 +44,20 @@ export const GEMINI_MODEL = config.gemini.model;
 const MAX_INLINE_AUDIO_BYTES = 14 * 1024 * 1024;
 
 /**
+ * Per-attempt timeout on every Gemini call.
+ *
+ * The SDK's default for `interactions.create` is `timeout_ms: -1` — no timeout at
+ * all. A call that never answers then holds its job in "analyzing" forever: the
+ * orphan reaper deliberately skips jobs this process is running, so nothing
+ * would ever fail it. Measured 2026-09-23 against @google/genai 2.21.0: the
+ * timeout applies per ATTEMPT and a timed-out attempt is retried by the SDK's
+ * built-in policy (4 retries, exponential backoff, also covering 408/409/429/
+ * 5xx), so the worst case is bounded at ~5x this. 150 s is ~1.8x the slowest
+ * call measured, analyze at 84.4 s (docs/SPEC.md section g).
+ */
+const CALL_TIMEOUT_MS = 150_000;
+
+/**
  * Exactly the audio MIME types Gemini documents, and nothing else.
  *
  * `.m4a` and `.webm` were here and are deliberately gone: neither audio/m4a nor
@@ -222,22 +236,25 @@ export async function generateJson<T extends z.ZodType>(
 
   const startedAt = performance.now();
 
-  const interaction = await getGeminiClient().interactions.create({
-    model: GEMINI_MODEL,
-    input,
-    response_format: {
-      type: "text",
-      mime_type: "application/json",
-      schema: jsonSchema,
+  const interaction = await getGeminiClient().interactions.create(
+    {
+      model: GEMINI_MODEL,
+      input,
+      response_format: {
+        type: "text",
+        mime_type: "application/json",
+        schema: jsonSchema,
+      },
+      // Spread rather than passed as an explicit undefined: exactOptionalPropertyTypes
+      // is on, and an explicit `thinking_level: undefined` is also the shape most
+      // likely to be serialized into the request body as a null and rejected.
+      // Omitting the key entirely is what "use the model's default" has to mean.
+      ...(thinkingLevel === undefined
+        ? {}
+        : { generation_config: { thinking_level: thinkingLevel } }),
     },
-    // Spread rather than passed as an explicit undefined: exactOptionalPropertyTypes
-    // is on, and an explicit `thinking_level: undefined` is also the shape most
-    // likely to be serialized into the request body as a null and rejected.
-    // Omitting the key entirely is what "use the model's default" has to mean.
-    ...(thinkingLevel === undefined
-      ? {}
-      : { generation_config: { thinking_level: thinkingLevel } }),
-  });
+    { timeout: CALL_TIMEOUT_MS }
+  );
 
   const latencyMs = Math.round(performance.now() - startedAt);
 

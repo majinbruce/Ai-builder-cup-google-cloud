@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Noto_Sans_Devanagari } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
+import { SiteFooter } from "@/components/layout/site-footer";
 import { SiteHeader } from "@/components/layout/site-header";
 import { env } from "@/lib/env";
 import { getSiteConfig } from "@/lib/site-config.server";
@@ -34,7 +35,8 @@ export function generateMetadata(): Metadata {
       default: env.APP_NAME,
       template: `%s · ${env.APP_NAME}`,
     },
-    description: "",
+    description:
+      "Localizes English lectures into Hindi while keeping what the teacher defined, stressed and warned about, with the reasoning for every choice.",
   };
 }
 
@@ -53,6 +55,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
           <div className="flex min-h-dvh flex-col">
             <SiteHeader />
             <main className="flex-1">{children}</main>
+            <SiteFooter />
           </div>
         </Providers>
       </body>

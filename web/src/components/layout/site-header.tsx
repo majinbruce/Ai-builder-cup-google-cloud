@@ -3,12 +3,14 @@ import { Suspense } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AuthButton } from "@/components/auth/auth-button";
 import { ErrorBoundary } from "@/components/error-boundary";
+import { LogoMark } from "@/components/brand/logo-mark";
+import { NavLinks } from "@/components/layout/nav-links";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { env } from "@/lib/env";
 
 /**
- * The one piece of chrome the boilerplate ships. Everything project-specific —
- * navigation, a logo, a product name in the mark — replaces this file.
+ * The mark, the product name and the two places worth going: the demo, which
+ * needs no account, and the upload flow.
  *
  * The auth slot is wrapped in Suspense so a slow session lookup streams in
  * behind a skeleton rather than holding the whole document, and in an
@@ -18,17 +20,19 @@ import { env } from "@/lib/env";
 export function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 w-full border-b bg-background/80 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-5xl items-center justify-between gap-4 px-4">
-        <nav className="flex items-center gap-5 text-sm">
-          <Link href="/" className="font-semibold tracking-tight">
-            {env.APP_NAME}
+      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-4 px-4">
+        <nav className="flex min-w-0 items-center gap-3 text-sm sm:gap-5">
+          <Link
+            href="/"
+            className="flex min-w-0 items-center gap-2 font-semibold tracking-tight"
+          >
+            <LogoMark />
+            <span className="hidden truncate sm:inline">{env.APP_NAME}</span>
+            <span className="sr-only sm:hidden">{env.APP_NAME}</span>
           </Link>
-          <Link href="/demo" className="text-muted-foreground hover:text-foreground">
-            Demo
-          </Link>
-          <Link href="/localize" className="text-muted-foreground hover:text-foreground">
-            Localize
-          </Link>
+          <div className="flex items-center gap-1">
+            <NavLinks />
+          </div>
         </nav>
 
         <div className="flex items-center gap-1.5">

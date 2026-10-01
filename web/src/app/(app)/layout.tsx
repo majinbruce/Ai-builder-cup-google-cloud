@@ -23,5 +23,5 @@ import { requireSession } from "@/lib/auth-server";
 export default async function AppLayout({ children }: LayoutProps<"/">) {
   await requireSession();
 
-  return <div className="mx-auto w-full max-w-5xl px-4 py-10">{children}</div>;
+  return <div className="mx-auto w-full max-w-6xl px-4 py-10">{children}</div>;
 }

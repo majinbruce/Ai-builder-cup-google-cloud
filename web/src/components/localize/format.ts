@@ -34,6 +34,33 @@ export const SIGNAL_TONE: Record<PedagogicalSignal, string> = {
   none: "bg-muted text-muted-foreground",
 };
 
+/**
+ * The same colours at full strength, for the lesson map's bands, where a
+ * segment is a few pixels of colour with no text on it to carry contrast.
+ */
+export const SIGNAL_BAND: Record<PedagogicalSignal, string> = {
+  definition: "bg-sky-500",
+  key_term: "bg-violet-500",
+  example: "bg-emerald-500",
+  warning: "bg-red-500",
+  emphasis_shift: "bg-amber-400",
+  transition: "bg-slate-400 dark:bg-slate-500",
+  recap: "bg-teal-500",
+  none: "bg-muted-foreground/25",
+};
+
+/** One line per signal: what the teacher was doing, in a learner's terms. */
+export const SIGNAL_MEANING: Record<PedagogicalSignal, string> = {
+  definition: "States what something is",
+  key_term: "Names a term the learner must remember",
+  example: "Makes an idea concrete",
+  warning: "Flags a common mistake",
+  emphasis_shift: "Changes tone because this part matters",
+  transition: "Moves the lesson to its next idea",
+  recap: "Sums up what was covered",
+  none: "No instructional role",
+};
+
 export const CHOICE_LABEL: Record<ChoiceKind, string> = {
   idiom: "Idiom adapted",
   cultural_reference: "Cultural reference",
