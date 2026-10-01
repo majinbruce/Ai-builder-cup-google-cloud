@@ -281,6 +281,23 @@ export async function writeStreamToFile(
 }
 
 /**
+ * The most one ranged response carries.
+ *
+ * Cloud Run refuses an HTTP/1 response over 32 MiB that is not chunked
+ * (docs/research.md § Cloud Run; measured 2026-10-01: a 38 MiB video answered
+ * `Range: bytes=0-` with a 500). A <video> opens with exactly that open-ended
+ * range. HTTP lets a server answer a range with a SHORTER one — Content-Range
+ * says what was sent — and media elements simply ask for the next piece, so
+ * capping the piece is the standard fix rather than a workaround.
+ */
+export const MAX_RANGE_BYTES = 8 * 1024 * 1024;
+
+/** Shortens a satisfiable range to at most MAX_RANGE_BYTES. Pure. */
+export function capRange(range: ByteRange, max = MAX_RANGE_BYTES): ByteRange {
+  return { start: range.start, end: Math.min(range.end, range.start + max - 1) };
+}
+
+/**
  * Parses an HTTP `Range` header against a known size.
  *
  * Only the single-range `bytes=` form, because that is all an <audio> element

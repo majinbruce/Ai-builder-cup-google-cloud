@@ -16,6 +16,8 @@ import {
 } from "../../lib/api-response.ts";
 import { requireUser } from "../../lib/require-user.ts";
 import {
+  MAX_RANGE_BYTES,
+  capRange,
   fileSize,
   openReadStream,
   parseRangeHeader,
@@ -78,7 +80,6 @@ import {
  */
 const UPLOADS_PER_HOUR = 20;
 
-
 const jobEnvelope = successEnvelope(Job);
 const commonErrors = { 400: errorEnvelope, 401: errorEnvelope, 500: errorEnvelope };
 
@@ -118,14 +119,18 @@ async function sendMedia(
   }
 
   if (range === undefined) {
-    return reply.header("content-length", size).send(openReadStream(uri));
+    // Under Cloud Run's 32 MiB cap a length can be declared; past it the body
+    // must go chunked (no content-length), or Cloud Run answers 500.
+    if (size <= MAX_RANGE_BYTES) reply.header("content-length", size);
+    return reply.send(openReadStream(uri));
   }
 
+  const piece = capRange(range);
   return reply
     .code(206)
-    .header("content-range", `bytes ${range.start}-${range.end}/${size}`)
-    .header("content-length", range.end - range.start + 1)
-    .send(openReadStream(uri, range));
+    .header("content-range", `bytes ${piece.start}-${piece.end}/${size}`)
+    .header("content-length", piece.end - piece.start + 1)
+    .send(openReadStream(uri, piece));
 }
 
 const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = async (
@@ -324,7 +329,10 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
         const user = requireUser(request);
         const body = request.body as Readable | undefined;
         if (body === undefined || typeof body.pipe !== "function") {
-          throw new AppError("Send the file as the raw body with its audio/video type.", 415);
+          throw new AppError(
+            "Send the file as the raw body with its audio/video type.",
+            415
+          );
         }
         await localizeService.receiveLocalUpload(user.id, request.params.uploadId, body);
         return ok({ uploadId: request.params.uploadId }, "Upload received");

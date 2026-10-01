@@ -2,7 +2,13 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildTestApp } from "./helpers.ts";
 import type { App } from "../src/app.ts";
-import { jobKey, parseRangeHeader, parseStorageUri } from "../src/lib/storage.ts";
+import {
+  MAX_RANGE_BYTES,
+  capRange,
+  jobKey,
+  parseRangeHeader,
+  parseStorageUri,
+} from "../src/lib/storage.ts";
 
 /**
  * The localize routes up to the point they would touch Postgres, plus the two
@@ -42,6 +48,24 @@ describe("localize routes without a session", () => {
 
     expect(res.statusCode).toBe(400);
     expect(res.json()).toMatchObject({ statusCode: -1, message: "Validation failed" });
+  });
+});
+
+describe("capRange", () => {
+  it("shortens an open-ended range to one piece under Cloud Run's response cap", () => {
+    // What a <video> sends first for a 38 MiB file: bytes=0-.
+    const size = 38 * 1024 * 1024;
+    const piece = capRange({ start: 0, end: size - 1 });
+    expect(piece).toEqual({ start: 0, end: MAX_RANGE_BYTES - 1 });
+    expect(MAX_RANGE_BYTES).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  it("leaves a range that already fits alone", () => {
+    expect(capRange({ start: 100, end: 199 })).toEqual({ start: 100, end: 199 });
+  });
+
+  it("caps from the requested start, not from zero", () => {
+    expect(capRange({ start: 50, end: 10_000 }, 100)).toEqual({ start: 50, end: 149 });
   });
 });
 
