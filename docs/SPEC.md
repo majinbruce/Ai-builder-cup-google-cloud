@@ -452,6 +452,20 @@ The prompt states these tie-breaks.
 
 ## d. The reasoning panel (per segment)
 
+**Where it lives (amended 2026-10-01).** The product is a video library, not a
+results dump. `/localize` is **My videos**: a grid of cards (poster frame from
+ingest, topic, length, live status) with an *Upload video* dialog and an
+owner-only delete (`DELETE /jobs/:id`, row and every GCS file under
+`jobs/<id>/`). A card opens the **watch page**: one player with an
+English | Hindi switch that keeps the playhead (stage 4 puts the Hindi on the
+source timeline, so the same second is the same moment), an optional
+side-by-side layout, a *Download Hindi* button (`?download=1`), and a one-line
+score summary. Below it, two tabs: **Lesson** (a chapter list in the language
+on screen) and **How the AI adapted it**, which holds everything in this
+section unchanged: lesson map, scores, segments with this panel, the brief and
+glossary, and the call log. The reasoning moved one click away, not out of
+the product.
+
 Selecting a segment in the side-by-side view opens a panel with, top to bottom:
 
 1. **Signal header** — signal badge with confidence, register chip, pace chip,

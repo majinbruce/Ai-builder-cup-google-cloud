@@ -47,6 +47,8 @@ export const insert = async (
     targetLanguage: string;
     sourceUri: string;
     sourceVideoUri?: string;
+    posterUri?: string;
+    sourceDurationSec?: number;
   }
 ): Promise<LocalizeJobRow> => {
   const [row] = await db
@@ -161,6 +163,22 @@ export const updateStage = async (
     .update(localizeJobs)
     .set({ ...write, updatedAt: new Date() })
     .where(and(eq(localizeJobs.id, id), ne(localizeJobs.status, "failed")));
+};
+
+/**
+ * Deletes one job, but only if it belongs to `userId` — the same WHERE-clause
+ * ownership as findForUser. Returns whether a row went.
+ */
+export const deleteForUser = async (
+  db: Database,
+  id: string,
+  userId: string
+): Promise<boolean> => {
+  const deleted = await db
+    .delete(localizeJobs)
+    .where(and(eq(localizeJobs.id, id), eq(localizeJobs.userId, userId)))
+    .returning({ id: localizeJobs.id });
+  return deleted.length > 0;
 };
 
 /** How many jobs a user has started since `since`, whatever became of them. */
@@ -286,6 +304,8 @@ export const toDto = (row: LocalizeJobRow): Job => ({
   sourceUri: row.sourceUri,
   sourceVideoUri: row.sourceVideoUri,
   outputVideoUri: row.outputVideoUri,
+  posterUri: row.posterUri,
+  sourceDurationSec: row.sourceDurationSec,
   error: row.error,
   analysis: nullable(Analysis, row.analysis),
   corroboration: nullable(Corroboration, row.corroboration),
@@ -319,6 +339,9 @@ export const toSummary = (row: LocalizeJobRow): JobSummary => {
     status: row.status,
     topic: analysis?.topic ?? null,
     segmentCount: analysis?.segments.length ?? null,
+    hasVideo: row.sourceVideoUri !== null,
+    hasPoster: row.posterUri !== null,
+    durationSec: row.sourceDurationSec,
     error: row.error,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

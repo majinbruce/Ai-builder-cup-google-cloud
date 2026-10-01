@@ -659,6 +659,10 @@ export const Job = z.object({
   sourceVideoUri: z.string().nullable(),
   /** The footage with the Hindi under it. Null until done, or if the mux failed. */
   outputVideoUri: z.string().nullable(),
+  /** A frame of the footage for the library. Null for audio uploads. */
+  posterUri: z.string().nullable(),
+  /** Measured at ingest. Null on jobs from before 2026-10-01. */
+  sourceDurationSec: z.number().nullable(),
   error: z.string().nullable(),
   analysis: Analysis.nullable(),
   corroboration: Corroboration.nullable(),
@@ -680,10 +684,17 @@ export const JobSummary = z.object({
   status: JobStatus,
   topic: z.string().nullable(),
   segmentCount: z.number().int().nonnegative().nullable(),
+  /** What the library card can show: a thumbnail, a video badge, a length. */
+  hasVideo: z.boolean(),
+  hasPoster: z.boolean(),
+  durationSec: z.number().nullable(),
   error: z.string().nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 });
+
+/** `?download=1` makes a media route answer as an attachment, for the download button. */
+export const MediaQuery = z.object({ download: z.literal("1").optional() });
 
 export const JobIdParams = z.object({ id: z.uuid() });
 
@@ -699,7 +710,9 @@ export const ACCEPTED_UPLOAD_TYPE = /^(audio\/[\w.+-]+|video\/mp4)$/;
 
 /** Step 1 of a direct upload: ask where to put the file. */
 export const CreateUploadBody = z.strictObject({
-  contentType: z.string().regex(ACCEPTED_UPLOAD_TYPE, "Must be an audio file or an mp4 video."),
+  contentType: z
+    .string()
+    .regex(ACCEPTED_UPLOAD_TYPE, "Must be an audio file or an mp4 video."),
   sizeBytes: z.number().int().positive(),
 });
 

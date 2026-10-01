@@ -34,6 +34,7 @@ import {
   JobIdParams,
   JobSummary,
   ListJobsQuery,
+  MediaQuery,
   UploadIdParams,
   UploadTarget,
 } from "./localize.schemas.ts";
@@ -51,9 +52,15 @@ import {
  *   GET   /jobs/:id                 owner   the full job; the UI polls this
  *   GET   /jobs/:id/audio/:which    owner   source or output mp3, Range-aware
  *   GET   /jobs/:id/video/:which    owner   source or output mp4, Range-aware
+ *   GET   /jobs/:id/poster          owner   a frame of the footage (jpeg)
+ *   DELETE /jobs/:id                owner   the job and all its files; 409 while running
  *   GET   /demo                     public  the promoted demo job, full
  *   GET   /demo/audio/:which        public  its audio
  *   GET   /demo/video/:which        public  its video
+ *   GET   /demo/poster              public  its poster frame
+ *
+ * Every media route takes `?download=1`, which adds Content-Disposition:
+ * attachment so the browser saves the file instead of playing it.
  *
  * Uploads are under uploads/<userId>/<uploadId>: the caller's id is in the key,
  * so /jobs/from-upload with somebody else's upload id finds nothing.
@@ -89,6 +96,25 @@ export interface LocalizeRoutesOptions {
 }
 
 /**
+ * A safe file name from the job's topic, for Content-Disposition. ASCII only and
+ * no quotes, so it cannot break out of the header's quoted string; a topic with
+ * nothing usable falls back to "lecture".
+ */
+export function downloadNameFor(
+  job: Job,
+  which: "source" | "output",
+  extension: "mp3" | "mp4"
+): string {
+  const slug =
+    (job.analysis?.topic ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "lecture";
+  return `${slug}-${which === "output" ? "hindi" : "english"}.${extension}`;
+}
+
+/**
  * Streams one stored mp3 or mp4, honouring a single byte range.
  *
  * Range is not an optimisation here, it is a feature: the reasoning panel plays
@@ -100,11 +126,17 @@ async function sendMedia(
   request: FastifyRequest,
   reply: FastifyReply,
   uri: string,
-  contentType: "audio/mpeg" | "video/mp4",
-  cacheControl = "private, max-age=3600"
+  contentType: "audio/mpeg" | "video/mp4" | "image/jpeg",
+  cacheControl = "private, max-age=3600",
+  /** Set for `?download=1`: the name the browser saves the file under. */
+  downloadName?: string
 ): Promise<FastifyReply> {
   const size = await fileSize(uri);
   const range = parseRangeHeader(request.headers.range, size);
+
+  if (downloadName !== undefined) {
+    reply.header("content-disposition", `attachment; filename="${downloadName}"`);
+  }
 
   reply
     .header("accept-ranges", "bytes")
@@ -428,6 +460,7 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
         summary: "Stream a job's source or synthesized audio (Range-aware)",
         security: [{ cookieAuth: [] }, { bearerAuth: [] }],
         params: JobAudioParams,
+        querystring: MediaQuery,
         // 200/206 are raw audio, so no serializer schema; only failures are JSON.
         response: { 404: errorEnvelope, ...commonErrors },
       },
@@ -441,7 +474,11 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
         request,
         reply,
         localizeService.audioUriFor(job, request.params.which),
-        "audio/mpeg"
+        "audio/mpeg",
+        undefined,
+        request.query.download === "1"
+          ? downloadNameFor(job, request.params.which, "mp3")
+          : undefined
       );
     }
   );
@@ -454,6 +491,7 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
         summary: "Stream a job's source or Hindi video (Range-aware)",
         security: [{ cookieAuth: [] }, { bearerAuth: [] }],
         params: JobAudioParams,
+        querystring: MediaQuery,
         response: { 404: errorEnvelope, ...commonErrors },
       },
     },
@@ -466,8 +504,55 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
         request,
         reply,
         localizeService.videoUriFor(job, request.params.which),
-        "video/mp4"
+        "video/mp4",
+        undefined,
+        request.query.download === "1"
+          ? downloadNameFor(job, request.params.which, "mp4")
+          : undefined
       );
+    }
+  );
+
+  app.get(
+    "/jobs/:id/poster",
+    {
+      schema: {
+        tags: ["localize"],
+        summary: "A frame of the job's footage, for the library grid",
+        security: [{ cookieAuth: [] }, { bearerAuth: [] }],
+        params: JobIdParams,
+        response: { 404: errorEnvelope, ...commonErrors },
+      },
+    },
+    async (request, reply) => {
+      const user = requireUser(request);
+      const ctx = { db: app.db, log: request.log };
+      const job = await localizeService.getJob(ctx, user.id, request.params.id);
+      return sendMedia(request, reply, localizeService.posterUriFor(job), "image/jpeg");
+    }
+  );
+
+  app.delete(
+    "/jobs/:id",
+    {
+      schema: {
+        tags: ["localize"],
+        summary: "Delete one of your videos and all its files",
+        security: [{ cookieAuth: [] }, { bearerAuth: [] }],
+        params: JobIdParams,
+        response: {
+          200: successEnvelope(JobIdParams),
+          404: errorEnvelope,
+          409: errorEnvelope,
+          ...commonErrors,
+        },
+      },
+    },
+    async (request) => {
+      const user = requireUser(request);
+      const ctx = { db: app.db, log: request.log };
+      await localizeService.deleteJob(ctx, user.id, request.params.id);
+      return ok({ id: request.params.id }, "Job deleted");
     }
   );
 };
@@ -495,6 +580,7 @@ const publicDemoRoutes: FastifyPluginAsyncZod = async (app) => {
         tags: ["localize"],
         summary: "The demo job's audio (Range-aware)",
         params: DemoAudioParams,
+        querystring: MediaQuery,
         response: { 400: errorEnvelope, 404: errorEnvelope, 500: errorEnvelope },
       },
     },
@@ -507,7 +593,10 @@ const publicDemoRoutes: FastifyPluginAsyncZod = async (app) => {
         "audio/mpeg",
         // Not cached: the URL stays the same when a different job is promoted,
         // and an hour-long max-age would keep playing the previous demo's audio.
-        "no-cache"
+        "no-cache",
+        request.query.download === "1"
+          ? downloadNameFor(job, request.params.which, "mp3")
+          : undefined
       );
     }
   );
@@ -519,6 +608,7 @@ const publicDemoRoutes: FastifyPluginAsyncZod = async (app) => {
         tags: ["localize"],
         summary: "The demo job's video (Range-aware)",
         params: DemoAudioParams,
+        querystring: MediaQuery,
         response: { 400: errorEnvelope, 404: errorEnvelope, 500: errorEnvelope },
       },
     },
@@ -529,6 +619,30 @@ const publicDemoRoutes: FastifyPluginAsyncZod = async (app) => {
         reply,
         localizeService.videoUriFor(job, request.params.which),
         "video/mp4",
+        "no-cache",
+        request.query.download === "1"
+          ? downloadNameFor(job, request.params.which, "mp4")
+          : undefined
+      );
+    }
+  );
+
+  app.get(
+    "/demo/poster",
+    {
+      schema: {
+        tags: ["localize"],
+        summary: "The demo job's poster frame",
+        response: { 404: errorEnvelope, 500: errorEnvelope },
+      },
+    },
+    async (request, reply) => {
+      const job = await localizeService.getDemoJob({ db: app.db, log: request.log });
+      return sendMedia(
+        request,
+        reply,
+        localizeService.posterUriFor(job),
+        "image/jpeg",
         "no-cache"
       );
     }

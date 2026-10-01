@@ -1,4 +1,4 @@
-import type { z } from "zod";
+import { z } from "zod";
 import { ApiError, paginatedEnvelope, successEnvelope } from "@/lib/api/envelope";
 import { apiFetch } from "@/lib/api/client";
 import {
@@ -133,4 +133,16 @@ export function videoUrl(
   return options.demo === true
     ? `/api/v1/localize/demo/video/${which}`
     : `/api/v1/localize/jobs/${job.id}/video/${which}`;
+}
+
+const deletedResponse = successEnvelope(z.object({ id: z.uuid() }));
+
+/** DELETE /api/v1/localize/jobs/:id — owner only; 409 while the job is still running. */
+export async function deleteJob(id: string): Promise<void> {
+  await apiFetch(`/api/v1/localize/jobs/${id}`, deletedResponse, { method: "DELETE" });
+}
+
+/** A frame of the job's footage, for the library card. Only when `hasPoster`. */
+export function posterUrl(job: { id: string }): string {
+  return `/api/v1/localize/jobs/${job.id}/poster`;
 }

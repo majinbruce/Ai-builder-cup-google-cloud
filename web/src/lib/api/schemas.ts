@@ -321,6 +321,8 @@ export const jobSchema = z.object({
   sourceVideoUri: z.string().nullable().default(null),
   /** The footage with the Hindi under it; null until done, or if the mux failed. */
   outputVideoUri: z.string().nullable().default(null),
+  posterUri: z.string().nullable().default(null),
+  sourceDurationSec: z.number().nullable().default(null),
   error: z.string().nullable(),
   analysis: analysisSchema.nullable(),
   corroboration: corroborationSchema.nullable(),
@@ -340,6 +342,11 @@ export const jobSummarySchema = z.object({
   status: jobStatusSchema,
   topic: z.string().nullable(),
   segmentCount: z.number().int().nullable(),
+  // Defaulted like the Job's video fields, so a newer web build still parses an
+  // older API's list.
+  hasVideo: z.boolean().default(false),
+  hasPoster: z.boolean().default(false),
+  durationSec: z.number().nullable().default(null),
   error: z.string().nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),

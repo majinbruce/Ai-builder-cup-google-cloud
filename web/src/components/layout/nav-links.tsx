@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 
 const LINKS = [
   { href: "/demo", label: "Demo" },
-  { href: "/localize", label: "Localize" },
+  { href: "/localize", label: "My videos" },
 ] as const;
 
 /** The header's links, with the current section marked for sighted and AT users. */

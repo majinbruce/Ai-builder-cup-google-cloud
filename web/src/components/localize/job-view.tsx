@@ -1,10 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, RotateCcw, Volume2 } from "lucide-react";
+import Link from "next/link";
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Columns2,
+  Download,
+  RotateCcw,
+  Square,
+  Volume2,
+} from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { audioUrl, getJob, videoUrl } from "@/lib/api/localize";
 import type { Job, JobStatus, ModelCall } from "@/lib/api/schemas";
 import { cn } from "@/lib/utils";
@@ -171,6 +183,19 @@ export function JobView({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
   const [playing, setPlaying] = useState<{ id: string; sourceSec: number } | null>(null);
+  // One player with a language switch by default; both side by side on request.
+  // Both media elements stay mounted either way, so switching never reloads.
+  const [layout, setLayout] = useState<"single" | "side">("single");
+  const [language, setLanguage] = useState<"source" | "output">(
+    initialJob.synthesis === null ? "source" : "output"
+  );
+  // Whether the viewer has picked a language. Until they do, the page shows
+  // the Hindi the moment it lands, which is what they came for.
+  const languageChosen = useRef(false);
+  const hindiLanded = job.synthesis !== null;
+  useEffect(() => {
+    if (hindiLanded && !languageChosen.current) setLanguage("output");
+  }, [hindiLanded]);
 
   // Media elements, not audio elements: a job made from an mp4 plays <video>,
   // and everything below (seek, stop-at, playhead) is the same API on both.
@@ -252,12 +277,47 @@ export function JobView({
 
     const start = which === "source" ? entry.source.startSec : entry.output?.startSec;
     const length =
-      which === "source" ? entry.source.endSec - entry.source.startSec : entry.output?.lengthSec;
+      which === "source"
+        ? entry.source.endSec - entry.source.startSec
+        : entry.output?.lengthSec;
     if (start === undefined || length === undefined) return;
 
     other?.pause();
+    setLanguage(which);
     element.currentTime = start;
     stopAt.current = { element, startSec: start, endSec: start + length };
+    void element.play();
+  };
+
+  /**
+   * The language switch. Stage 4 lays the Hindi on the English timeline, so
+   * the same second in the other track is the same moment of the lesson:
+   * switching mid-sentence carries on from there, playing if it was playing.
+   */
+  const switchLanguage = (next: "source" | "output") => {
+    languageChosen.current = true;
+    if (next === language) return;
+    const from = language === "source" ? sourceAudio.current : outputAudio.current;
+    const to = next === "source" ? sourceAudio.current : outputAudio.current;
+    setLanguage(next);
+    if (from === null || to === null) return;
+    const wasPlaying = !from.paused;
+    from.pause();
+    stopAt.current = null;
+    to.currentTime = Math.min(
+      from.currentTime,
+      Number.isFinite(to.duration) ? to.duration : Infinity
+    );
+    if (wasPlaying) void to.play();
+  };
+
+  /** A chapter in the Lesson tab: jump there in the language on screen and keep playing. */
+  const jumpTo = (entry: SegmentBundle) => {
+    const element = language === "source" ? sourceAudio.current : outputAudio.current;
+    const start = language === "source" ? entry.source.startSec : entry.output?.startSec;
+    if (element === null || start === undefined) return;
+    stopAt.current = null;
+    element.currentTime = start;
     void element.play();
   };
 
@@ -328,21 +388,31 @@ export function JobView({
   );
   const retriedCount = job.retriedIds?.length ?? 0;
 
+  const hasVideo = job.sourceVideoUri !== null;
+  const hindiReady = synthesis !== null;
+  const hindiDownload = hindiReady
+    ? `${job.outputVideoUri === null ? audioUrl(job, "output", { demo }) : videoUrl(job, "output", { demo })}?download=1`
+    : null;
+
   return (
-    <div className="grid gap-8">
+    <div className="grid gap-6">
       <header className="grid gap-2">
+        {demo ? null : (
+          <Link
+            href="/localize"
+            className="inline-flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="size-4" aria-hidden /> My videos
+          </Link>
+        )}
         <h1 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-          {analysis?.topic ?? "Localizing your clip"}
+          {analysis?.topic ?? "Localizing your video"}
         </h1>
-        <p className="text-sm text-muted-foreground">
-          English to Hindi
-          {analysis === null ? "" : `, for ${analysis.audience.toLowerCase()}`}
-          {segments.length === 0 ? "" : `. ${segments.length} segments`}
-          {synthesis === null
-            ? ""
-            : `, ${Math.round(synthesis.durationSec)} seconds of Hindi audio`}
-          .
-        </p>
+        {analysis === null ? null : (
+          <p className="text-sm text-muted-foreground">
+            English to Hindi, for {analysis.audience.toLowerCase()}
+          </p>
+        )}
       </header>
 
       {demo ? <DemoGuide /> : null}
@@ -371,357 +441,513 @@ export function JobView({
         </p>
       )}
 
-      {analysis === null ? null : (
-        <Card>
-          <CardContent className="grid gap-6">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Track label="Original, English">
-                {job.sourceVideoUri === null ? (
-                  <audio
-                    ref={sourceAudio as React.RefObject<HTMLAudioElement | null>}
-                    controls
-                    preload="metadata"
-                    src={audioUrl(job, "source", { demo })}
-                    onTimeUpdate={(event) => onTimeUpdate(event, "source")}
-                    onPause={onPause}
-                    onPlay={() => onPlay("source")}
-                    className="w-full"
-                  />
-                ) : (
-                  <video
-                    ref={sourceAudio as React.RefObject<HTMLVideoElement | null>}
-                    controls
-                    playsInline
-                    preload="metadata"
-                    src={videoUrl(job, "source", { demo })}
-                    onTimeUpdate={(event) => onTimeUpdate(event, "source")}
-                    onPause={onPause}
-                    onPlay={() => onPlay("source")}
-                    className="aspect-video w-full rounded-md bg-black"
-                  />
-                )}
-              </Track>
-              <Track label="Localized, Hindi">
-                {synthesis === null ? (
-                  <p
-                    className={cn(
-                      "flex items-center text-sm text-muted-foreground",
-                      job.sourceVideoUri === null
-                        ? "h-[54px]"
-                        : "aspect-video justify-center rounded-md border border-dashed px-4 text-center"
-                    )}
-                  >
-                    The Hindi voice is recorded last
-                    {job.sourceVideoUri === null ? "." : ", then laid under the video."}
-                  </p>
-                ) : job.outputVideoUri === null ? (
-                  <audio
-                    ref={outputAudio as React.RefObject<HTMLAudioElement | null>}
-                    controls
-                    preload="metadata"
-                    src={audioUrl(job, "output", { demo })}
-                    onTimeUpdate={(event) => onTimeUpdate(event, "output")}
-                    onPause={onPause}
-                    onPlay={() => onPlay("output")}
-                    className="w-full"
-                  />
-                ) : (
-                  <video
-                    ref={outputAudio as React.RefObject<HTMLVideoElement | null>}
-                    controls
-                    playsInline
-                    preload="metadata"
-                    src={videoUrl(job, "output", { demo })}
-                    onTimeUpdate={(event) => onTimeUpdate(event, "output")}
-                    onPause={onPause}
-                    onPlay={() => onPlay("output")}
-                    className="aspect-video w-full rounded-md bg-black"
-                  />
-                )}
-              </Track>
-            </div>
-
-            <div className="grid gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-sm font-medium">
-                  What the teacher is doing, moment by moment
-                </h2>
-                <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={follow}
-                    onChange={(event) => setFollow(event.target.checked)}
-                    className="size-3.5 accent-primary"
-                  />
-                  Follow the audio
-                </label>
-              </div>
-              <LessonMap
-                segments={segments.map((entry) => entry.source)}
-                selectedId={selected?.source.id}
-                onSelect={(id) => choose(id)}
-                playheadSec={playing?.sourceSec ?? null}
-              />
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {critique === null ? null : (
-        <dl className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <Stat
-            label="Fidelity"
-            value={critique.overallFidelity}
-            outOf={100}
-            hint="Does the Hindi still teach the same thing? Scored by a critic that never saw the reasoning."
-          />
-          <Stat
-            label="Naturalness"
-            value={critique.overallNaturalness}
-            outOf={100}
-            hint="Does it sound like a teacher speaking, rather than a translation?"
-          />
-          {corroboration === null ? null : (
-            <Stat
-              label="Stress confirmed in the audio"
-              value={corroboration.supportedByEnergy}
-              outOf={corroboration.emphasisChecks.length}
-              hint="Words the model heard stressed that ffmpeg's loudness measurements back up."
-            />
-          )}
-          <Stat
-            label="Rewritten after critique"
-            value={retriedCount}
-            outOf={segments.length}
-            hint="Segments that scored under 70 and were adapted again, once."
-          />
-        </dl>
-      )}
-
-      {segments.length === 0 || selected === undefined ? null : (
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
-          <section
-            className="grid content-start gap-3"
-            aria-labelledby="segments-heading"
+      <Card>
+        <CardContent className="grid gap-4">
+          <div
+            className={cn(
+              "grid gap-4",
+              layout === "side" && hindiReady && "sm:grid-cols-2"
+            )}
           >
-            <div className="flex items-baseline justify-between gap-2">
-              <h2 id="segments-heading" className="text-lg font-semibold tracking-tight">
-                Segments
-              </h2>
-              <span className="hidden text-xs text-muted-foreground sm:inline">
-                Use ↑ and ↓ to move between them
+            <Track
+              label="Original, English"
+              hidden={layout === "single" && language !== "source"}
+              showLabel={layout === "side"}
+            >
+              {job.sourceVideoUri === null ? (
+                <audio
+                  ref={sourceAudio as React.RefObject<HTMLAudioElement | null>}
+                  controls
+                  preload="metadata"
+                  src={audioUrl(job, "source", { demo })}
+                  onTimeUpdate={(event) => onTimeUpdate(event, "source")}
+                  onPause={onPause}
+                  onPlay={() => onPlay("source")}
+                  className="w-full"
+                />
+              ) : (
+                <video
+                  ref={sourceAudio as React.RefObject<HTMLVideoElement | null>}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  src={videoUrl(job, "source", { demo })}
+                  onTimeUpdate={(event) => onTimeUpdate(event, "source")}
+                  onPause={onPause}
+                  onPlay={() => onPlay("source")}
+                  className="aspect-video max-h-[60vh] w-full rounded-md bg-black"
+                />
+              )}
+            </Track>
+            <Track
+              label="Localized, Hindi"
+              hidden={layout === "single" && (language !== "output" || !hindiReady)}
+              showLabel={layout === "side"}
+            >
+              {synthesis === null ? (
+                <p
+                  className={cn(
+                    "flex items-center text-sm text-muted-foreground",
+                    job.sourceVideoUri === null
+                      ? "h-[54px]"
+                      : "aspect-video justify-center rounded-md border border-dashed px-4 text-center"
+                  )}
+                >
+                  The Hindi voice is recorded last
+                  {job.sourceVideoUri === null ? "." : ", then laid under the video."}
+                </p>
+              ) : job.outputVideoUri === null ? (
+                <audio
+                  ref={outputAudio as React.RefObject<HTMLAudioElement | null>}
+                  controls
+                  preload="metadata"
+                  src={audioUrl(job, "output", { demo })}
+                  onTimeUpdate={(event) => onTimeUpdate(event, "output")}
+                  onPause={onPause}
+                  onPlay={() => onPlay("output")}
+                  className="w-full"
+                />
+              ) : (
+                <video
+                  ref={outputAudio as React.RefObject<HTMLVideoElement | null>}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  src={videoUrl(job, "output", { demo })}
+                  onTimeUpdate={(event) => onTimeUpdate(event, "output")}
+                  onPause={onPause}
+                  onPlay={() => onPlay("output")}
+                  className="aspect-video max-h-[60vh] w-full rounded-md bg-black"
+                />
+              )}
+            </Track>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {layout === "single" ? (
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                value={language}
+                onValueChange={(value) => {
+                  if (value === "source" || value === "output") switchLanguage(value);
+                }}
+                aria-label="Language"
+              >
+                <ToggleGroupItem value="source">English</ToggleGroupItem>
+                <ToggleGroupItem value="output" disabled={!hindiReady}>
+                  Hindi
+                </ToggleGroupItem>
+              </ToggleGroup>
+            ) : null}
+            {hindiReady ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-pressed={layout === "side"}
+                onClick={() => setLayout(layout === "single" ? "side" : "single")}
+              >
+                {layout === "single" ? <Columns2 /> : <Square />}
+                {layout === "single" ? "Side by side" : "One player"}
+              </Button>
+            ) : (
+              <span className="text-sm text-muted-foreground">
+                The Hindi {hasVideo ? "video" : "audio"} appears here when it is ready.
               </span>
-            </div>
-            <ol className="grid gap-2" onKeyDown={onListKeyDown}>
-              {segments.map((entry, index) => {
-                const active = entry.source.id === selected.source.id;
+            )}
+            {hindiDownload === null ? null : (
+              <Button variant="ghost" size="sm" className="ml-auto" asChild>
+                <a href={hindiDownload} download>
+                  <Download /> Download Hindi{" "}
+                  {job.outputVideoUri === null ? "audio" : "video"}
+                </a>
+              </Button>
+            )}
+          </div>
+
+          {critique === null ? null : (
+            <p className="text-sm text-muted-foreground">
+              Fidelity{" "}
+              <span className="font-medium text-foreground tabular-nums">
+                {critique.overallFidelity}
+              </span>
+              {" · "}Naturalness{" "}
+              <span className="font-medium text-foreground tabular-nums">
+                {critique.overallNaturalness}
+              </span>
+              {" · "}
+              {segments.length} segments
+              {adaptation === null
+                ? ""
+                : ` · ${adaptation.brief.glossary.length} glossary terms`}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {segments.length === 0 ? null : (
+        <Tabs defaultValue="lesson" className="gap-6">
+          <TabsList>
+            <TabsTrigger value="lesson">Lesson</TabsTrigger>
+            <TabsTrigger value="reasoning">How the AI adapted it</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="lesson">
+            <ol className="grid gap-1" aria-label="Lesson outline">
+              {segments.map((entry) => {
                 const heard = entry.source.id === playing?.id;
+                const text =
+                  language === "output" && entry.adapted !== undefined
+                    ? entry.adapted.targetText
+                    : entry.source.text;
+                const at =
+                  language === "output" ? entry.output?.startSec : entry.source.startSec;
                 return (
-                  <li key={entry.source.id} id={`segment-${entry.source.id}`}>
+                  <li key={entry.source.id}>
                     <button
                       type="button"
-                      onClick={() => choose(entry.source.id)}
-                      aria-current={active ? "true" : undefined}
+                      onClick={() => jumpTo(entry)}
+                      disabled={at === undefined}
                       className={cn(
-                        "grid w-full gap-2 rounded-lg border bg-card p-3 text-left text-sm transition-colors hover:border-primary/40",
-                        active && "border-primary bg-primary/5 hover:border-primary"
+                        "grid w-full grid-cols-[3.5rem_1fr] gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors hover:bg-muted disabled:opacity-60",
+                        heard && "bg-primary/5"
                       )}
                     >
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        <span className="tabular-nums text-muted-foreground">
-                          {index + 1}. {formatTime(entry.source.startSec)}
+                      <span className="pt-0.5 text-xs tabular-nums text-muted-foreground">
+                        {at === undefined ? "—" : formatTime(at)}
+                      </span>
+                      <span className="grid gap-1">
+                        <span className="flex items-center gap-2 text-xs">
+                          <span
+                            className={cn(
+                              "rounded px-1.5 py-0.5 font-medium",
+                              SIGNAL_TONE[entry.source.signal]
+                            )}
+                          >
+                            {SIGNAL_LABEL[entry.source.signal]}
+                          </span>
+                          {heard ? (
+                            <span className="inline-flex items-center gap-1 text-primary">
+                              <Volume2 className="size-3.5" aria-hidden /> playing
+                            </span>
+                          ) : null}
                         </span>
                         <span
-                          className={cn(
-                            "rounded px-1.5 py-0.5 font-medium",
-                            SIGNAL_TONE[entry.source.signal]
-                          )}
+                          lang={language === "output" ? "hi" : "en"}
+                          className={language === "output" ? "text-base" : undefined}
                         >
-                          {SIGNAL_LABEL[entry.source.signal]}
+                          {text}
                         </span>
-                        {heard ? (
-                          <span className="inline-flex items-center gap-1 text-primary">
-                            <Volume2 className="size-3.5" aria-hidden />
-                            playing
-                          </span>
-                        ) : null}
-                        {entry.retried ? (
-                          <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400">
-                            <RotateCcw className="size-3" aria-hidden /> rewritten
-                          </span>
-                        ) : null}
-                        {entry.critique === undefined ? null : (
-                          <span
-                            className="ml-auto tabular-nums text-muted-foreground"
-                            title="Fidelity and naturalness, out of 100"
-                          >
-                            {entry.critique.fidelity} / {entry.critique.naturalness}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-muted-foreground">{entry.source.text}</p>
-                      {entry.adapted === undefined ? null : (
-                        <p lang="hi" className="text-base">
-                          {entry.adapted.targetText}
-                        </p>
-                      )}
+                      </span>
                     </button>
                   </li>
                 );
               })}
             </ol>
-          </section>
+          </TabsContent>
 
-          <div ref={panelRef} className="scroll-mt-20">
-            <Card className="gap-0 py-0 lg:sticky lg:top-20 lg:max-h-[calc(100dvh-6rem)] lg:overflow-y-auto">
-              <CardHeader className="sticky top-0 z-10 flex flex-row items-center justify-between gap-2 border-b bg-card py-3">
-                <CardTitle className="text-base">
-                  Why segment {selectedIndex + 1} reads this way
-                </CardTitle>
-                <div className="flex items-center gap-1">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-8"
-                    disabled={selectedIndex === 0}
-                    onClick={() => step(-1)}
-                    aria-label="Previous segment"
-                  >
-                    <ChevronLeft />
-                  </Button>
-                  <span className="text-xs tabular-nums text-muted-foreground">
-                    {selectedIndex + 1} of {segments.length}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-8"
-                    disabled={selectedIndex === segments.length - 1}
-                    onClick={() => step(1)}
-                    aria-label="Next segment"
-                  >
-                    <ChevronRight />
-                  </Button>
+          <TabsContent value="reasoning" className="grid gap-8">
+            <Card>
+              <CardContent>
+                <div className="grid gap-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-sm font-medium">
+                      What the teacher is doing, moment by moment
+                    </h2>
+                    <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={follow}
+                        onChange={(event) => setFollow(event.target.checked)}
+                        className="size-3.5 accent-primary"
+                      />
+                      Follow the audio
+                    </label>
+                  </div>
+                  <LessonMap
+                    segments={segments.map((entry) => entry.source)}
+                    selectedId={selected?.source.id}
+                    onSelect={(id) => choose(id)}
+                    playheadSec={playing?.sourceSec ?? null}
+                  />
                 </div>
-              </CardHeader>
-              <CardContent className="py-5">
-                <ReasoningPanel
-                  key={selected.source.id}
-                  bundle={selected}
-                  glossary={adaptation?.brief.glossary ?? []}
-                  onPlay={(which) => playSegment(selected, which)}
-                />
               </CardContent>
             </Card>
-          </div>
-        </div>
-      )}
 
-      {adaptation === null ? null : (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">
-              The plan, written before any translation
-            </CardTitle>
-            <p className="text-sm text-muted-foreground">
-              One brief for the whole clip, so every segment speaks as the same teacher
-              and uses the same words for the same ideas.
-            </p>
-          </CardHeader>
-          <CardContent className="grid gap-5 text-sm">
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="grid content-start gap-1">
-                <h3 className="font-medium">The teacher</h3>
-                <p className="text-muted-foreground">
-                  {adaptation.brief.instructorPersona}
-                </p>
-              </div>
-              <div className="grid content-start gap-1">
-                <h3 className="font-medium">How the Hindi should sound</h3>
-                <p className="text-muted-foreground">
-                  {adaptation.brief.registerGuidance}
-                </p>
-              </div>
-            </div>
-            {adaptation.brief.glossary.length > 0 ? (
-              <div className="grid gap-2">
-                <h3 className="font-medium">
-                  Glossary, fixed for the whole clip ({adaptation.brief.glossary.length}{" "}
-                  terms)
-                </h3>
-                <div className="overflow-x-auto rounded-lg border">
-                  <table className="w-full text-left text-sm">
-                    <thead className="bg-muted/50 text-xs text-muted-foreground">
-                      <tr>
-                        <th className="px-3 py-2 font-medium">English</th>
-                        <th className="px-3 py-2 font-medium">Hindi</th>
-                        <th className="px-3 py-2 font-medium">Decision</th>
-                        <th className="px-3 py-2 font-medium">Why</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {adaptation.brief.glossary.map((entry) => (
-                        <tr key={entry.english} className="border-t align-top">
-                          <td className="px-3 py-2 font-medium">{entry.english}</td>
-                          <td className="px-3 py-2 whitespace-nowrap" lang="hi">
-                            {entry.targetForm}
-                          </td>
-                          <td className="px-3 py-2 text-xs whitespace-nowrap">
-                            {DECISION_LABEL[entry.decision]}
-                          </td>
-                          <td className="min-w-64 px-3 py-2 text-xs text-muted-foreground">
-                            {entry.why}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+            {critique === null ? null : (
+              <dl className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                <Stat
+                  label="Fidelity"
+                  value={critique.overallFidelity}
+                  outOf={100}
+                  hint="Does the Hindi still teach the same thing? Scored by a critic that never saw the reasoning."
+                />
+                <Stat
+                  label="Naturalness"
+                  value={critique.overallNaturalness}
+                  outOf={100}
+                  hint="Does it sound like a teacher speaking, rather than a translation?"
+                />
+                {corroboration === null ? null : (
+                  <Stat
+                    label="Stress confirmed in the audio"
+                    value={corroboration.supportedByEnergy}
+                    outOf={corroboration.emphasisChecks.length}
+                    hint="Words the model heard stressed that ffmpeg's loudness measurements back up."
+                  />
+                )}
+                <Stat
+                  label="Rewritten after critique"
+                  value={retriedCount}
+                  outOf={segments.length}
+                  hint="Segments that scored under 70 and were adapted again, once."
+                />
+              </dl>
+            )}
+
+            {segments.length === 0 || selected === undefined ? null : (
+              <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+                <section
+                  className="grid content-start gap-3"
+                  aria-labelledby="segments-heading"
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <h2
+                      id="segments-heading"
+                      className="text-lg font-semibold tracking-tight"
+                    >
+                      Segments
+                    </h2>
+                    <span className="hidden text-xs text-muted-foreground sm:inline">
+                      Use ↑ and ↓ to move between them
+                    </span>
+                  </div>
+                  <ol className="grid gap-2" onKeyDown={onListKeyDown}>
+                    {segments.map((entry, index) => {
+                      const active = entry.source.id === selected.source.id;
+                      const heard = entry.source.id === playing?.id;
+                      return (
+                        <li key={entry.source.id} id={`segment-${entry.source.id}`}>
+                          <button
+                            type="button"
+                            onClick={() => choose(entry.source.id)}
+                            aria-current={active ? "true" : undefined}
+                            className={cn(
+                              "grid w-full gap-2 rounded-lg border bg-card p-3 text-left text-sm transition-colors hover:border-primary/40",
+                              active && "border-primary bg-primary/5 hover:border-primary"
+                            )}
+                          >
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                              <span className="tabular-nums text-muted-foreground">
+                                {index + 1}. {formatTime(entry.source.startSec)}
+                              </span>
+                              <span
+                                className={cn(
+                                  "rounded px-1.5 py-0.5 font-medium",
+                                  SIGNAL_TONE[entry.source.signal]
+                                )}
+                              >
+                                {SIGNAL_LABEL[entry.source.signal]}
+                              </span>
+                              {heard ? (
+                                <span className="inline-flex items-center gap-1 text-primary">
+                                  <Volume2 className="size-3.5" aria-hidden />
+                                  playing
+                                </span>
+                              ) : null}
+                              {entry.retried ? (
+                                <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400">
+                                  <RotateCcw className="size-3" aria-hidden /> rewritten
+                                </span>
+                              ) : null}
+                              {entry.critique === undefined ? null : (
+                                <span
+                                  className="ml-auto tabular-nums text-muted-foreground"
+                                  title="Fidelity and naturalness, out of 100"
+                                >
+                                  {entry.critique.fidelity} / {entry.critique.naturalness}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-muted-foreground">{entry.source.text}</p>
+                            {entry.adapted === undefined ? null : (
+                              <p lang="hi" className="text-base">
+                                {entry.adapted.targetText}
+                              </p>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </section>
+
+                <div ref={panelRef} className="scroll-mt-20">
+                  <Card className="gap-0 py-0 lg:sticky lg:top-20 lg:max-h-[calc(100dvh-6rem)] lg:overflow-y-auto">
+                    <CardHeader className="sticky top-0 z-10 flex flex-row items-center justify-between gap-2 border-b bg-card py-3">
+                      <CardTitle className="text-base">
+                        Why segment {selectedIndex + 1} reads this way
+                      </CardTitle>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-8"
+                          disabled={selectedIndex === 0}
+                          onClick={() => step(-1)}
+                          aria-label="Previous segment"
+                        >
+                          <ChevronLeft />
+                        </Button>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {selectedIndex + 1} of {segments.length}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-8"
+                          disabled={selectedIndex === segments.length - 1}
+                          onClick={() => step(1)}
+                          aria-label="Next segment"
+                        >
+                          <ChevronRight />
+                        </Button>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="py-5">
+                      <ReasoningPanel
+                        key={selected.source.id}
+                        bundle={selected}
+                        glossary={adaptation?.brief.glossary ?? []}
+                        onPlay={(which) => playSegment(selected, which)}
+                      />
+                    </CardContent>
+                  </Card>
                 </div>
               </div>
-            ) : null}
-          </CardContent>
-        </Card>
-      )}
+            )}
 
-      {job.calls.length === 0 ? null : (
-        <details className="group rounded-lg border px-4 py-3 text-sm">
-          <summary className="cursor-pointer font-medium">
-            Under the hood: {job.calls.length} Gemini calls,{" "}
-            {(totals.latencyMs / 1000).toFixed(0)} s of model time
-          </summary>
-          <div className="mt-3 grid gap-1 text-xs tabular-nums text-muted-foreground">
-            <p>
-              {totals.input.toLocaleString()} input, {totals.output.toLocaleString()}{" "}
-              output and {totals.thought.toLocaleString()} thinking tokens
-              {synthesis === null
-                ? "."
-                : `; ${synthesis.billedChars.toLocaleString()} characters sent to Cloud Text-to-Speech.`}
-            </p>
-            <ul className="mt-2 grid gap-0.5">
-              {job.calls.map((call, index) => (
-                <li key={index}>
-                  {call.stage.replace("_", " ")} on {call.model}:{" "}
-                  {(call.latencyMs / 1000).toFixed(1)} s,{" "}
-                  {(
-                    call.inputTokens +
-                    call.outputTokens +
-                    call.thoughtTokens
-                  ).toLocaleString()}{" "}
-                  tokens
-                </li>
-              ))}
-            </ul>
-          </div>
-        </details>
+            {adaptation === null ? null : (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">
+                    The plan, written before any translation
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground">
+                    One brief for the whole clip, so every segment speaks as the same
+                    teacher and uses the same words for the same ideas.
+                  </p>
+                </CardHeader>
+                <CardContent className="grid gap-5 text-sm">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="grid content-start gap-1">
+                      <h3 className="font-medium">The teacher</h3>
+                      <p className="text-muted-foreground">
+                        {adaptation.brief.instructorPersona}
+                      </p>
+                    </div>
+                    <div className="grid content-start gap-1">
+                      <h3 className="font-medium">How the Hindi should sound</h3>
+                      <p className="text-muted-foreground">
+                        {adaptation.brief.registerGuidance}
+                      </p>
+                    </div>
+                  </div>
+                  {adaptation.brief.glossary.length > 0 ? (
+                    <div className="grid gap-2">
+                      <h3 className="font-medium">
+                        Glossary, fixed for the whole clip (
+                        {adaptation.brief.glossary.length} terms)
+                      </h3>
+                      <div className="overflow-x-auto rounded-lg border">
+                        <table className="w-full text-left text-sm">
+                          <thead className="bg-muted/50 text-xs text-muted-foreground">
+                            <tr>
+                              <th className="px-3 py-2 font-medium">English</th>
+                              <th className="px-3 py-2 font-medium">Hindi</th>
+                              <th className="px-3 py-2 font-medium">Decision</th>
+                              <th className="px-3 py-2 font-medium">Why</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {adaptation.brief.glossary.map((entry) => (
+                              <tr key={entry.english} className="border-t align-top">
+                                <td className="px-3 py-2 font-medium">{entry.english}</td>
+                                <td className="px-3 py-2 whitespace-nowrap" lang="hi">
+                                  {entry.targetForm}
+                                </td>
+                                <td className="px-3 py-2 text-xs whitespace-nowrap">
+                                  {DECISION_LABEL[entry.decision]}
+                                </td>
+                                <td className="min-w-64 px-3 py-2 text-xs text-muted-foreground">
+                                  {entry.why}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : null}
+                </CardContent>
+              </Card>
+            )}
+
+            {job.calls.length === 0 ? null : (
+              <details className="group rounded-lg border px-4 py-3 text-sm">
+                <summary className="cursor-pointer font-medium">
+                  Under the hood: {job.calls.length} Gemini calls,{" "}
+                  {(totals.latencyMs / 1000).toFixed(0)} s of model time
+                </summary>
+                <div className="mt-3 grid gap-1 text-xs tabular-nums text-muted-foreground">
+                  <p>
+                    {totals.input.toLocaleString()} input,{" "}
+                    {totals.output.toLocaleString()} output and{" "}
+                    {totals.thought.toLocaleString()} thinking tokens
+                    {synthesis === null
+                      ? "."
+                      : `; ${synthesis.billedChars.toLocaleString()} characters sent to Cloud Text-to-Speech.`}
+                  </p>
+                  <ul className="mt-2 grid gap-0.5">
+                    {job.calls.map((call, index) => (
+                      <li key={index}>
+                        {call.stage.replace("_", " ")} on {call.model}:{" "}
+                        {(call.latencyMs / 1000).toFixed(1)} s,{" "}
+                        {(
+                          call.inputTokens +
+                          call.outputTokens +
+                          call.thoughtTokens
+                        ).toLocaleString()}{" "}
+                        tokens
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </details>
+            )}
+          </TabsContent>
+        </Tabs>
       )}
     </div>
   );
 }
 
-function Track({ label, children }: { label: string; children: React.ReactNode }) {
+function Track({
+  label,
+  hidden = false,
+  showLabel = true,
+  children,
+}: {
+  label: string;
+  /** Kept mounted but not shown: the single-player layout's other language. */
+  hidden?: boolean;
+  /** Off in the single-player layout, where the language switch says it. */
+  showLabel?: boolean;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="grid gap-1.5">
-      <span className="text-sm font-medium">{label}</span>
+    <div className={cn("grid gap-1.5", hidden && "hidden")}>
+      {showLabel ? <span className="text-sm font-medium">{label}</span> : null}
       {children}
     </div>
   );
@@ -734,8 +960,8 @@ function Track({ label, children }: { label: string; children: React.ReactNode }
  */
 function DemoGuide() {
   const steps = [
-    "Play either track. The coloured map above the segments follows along, showing where the teacher defines, gives an example or changes tone.",
-    "Pick any segment to see why the Hindi says what it says, next to what a literal translation would have said.",
+    "Play it, then switch between English and Hindi: the Hindi runs on the same timeline, so you land at the same moment of the lesson.",
+    "Open “How the AI adapted it” and pick any segment to see why the Hindi says what it says, next to what a literal translation would have said.",
     "Check the work: a separate critic read the Hindi back into English without seeing the reasoning, and ffmpeg measured whether the stressed words really were stressed.",
   ];
   return (

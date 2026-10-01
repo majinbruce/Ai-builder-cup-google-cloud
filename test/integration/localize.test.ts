@@ -958,5 +958,79 @@ describe("direct uploads and video", () => {
     ]);
     expect(stdout).toContain("h264,video");
     expect(stdout).toContain("aac,audio");
+
+    // The library: a poster frame, and a summary that knows it is a video.
+    const poster = await app.inject({
+      method: "GET",
+      url: `/api/v1/localize/jobs/${queued.id}/poster`,
+      headers: { cookie: owner.cookie },
+    });
+    expect(poster.statusCode).toBe(200);
+    expect(poster.headers["content-type"]).toBe("image/jpeg");
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/api/v1/localize/jobs",
+      headers: { cookie: owner.cookie },
+    });
+    const card = list
+      .json<{
+        data: {
+          id: string;
+          hasVideo: boolean;
+          hasPoster: boolean;
+          durationSec: number;
+        }[];
+      }>()
+      .data.find((entry) => entry.id === queued.id);
+    expect(card).toMatchObject({ hasVideo: true, hasPoster: true });
+    expect(card?.durationSec).toBeCloseTo(3, 0);
+
+    // The download button: same bytes, saved rather than played.
+    const download = await app.inject({
+      method: "GET",
+      url: `/api/v1/localize/jobs/${queued.id}/video/output?download=1`,
+      headers: { cookie: owner.cookie },
+    });
+    expect(download.statusCode).toBe(200);
+    expect(download.headers["content-disposition"]).toMatch(
+      /^attachment; filename="[a-z0-9-]+-hindi\.mp4"$/
+    );
+  });
+
+  it("deletes a video and every file it had, for its owner only", async () => {
+    const owner = await directOwner();
+    const outsider = await newUser();
+    behaviour.throwIn = null;
+    behaviour.failIds = [];
+
+    const { job } = await directUpload(owner, fixtureBytes, "audio/mpeg");
+    const queued = Job.parse(job.json<{ data: unknown }>().data);
+    await settle(owner, queued.id);
+    const jobDir = path.resolve("outputs", "storage", "jobs", queued.id);
+    expect(fs.existsSync(jobDir)).toBe(true);
+
+    const stolen = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/localize/jobs/${queued.id}`,
+      headers: { cookie: outsider.cookie },
+    });
+    expect(stolen.statusCode).toBe(404);
+    expect(fs.existsSync(jobDir)).toBe(true);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/localize/jobs/${queued.id}`,
+      headers: { cookie: owner.cookie },
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(fs.existsSync(jobDir)).toBe(false);
+
+    const gone = await app.inject({
+      method: "GET",
+      url: `/api/v1/localize/jobs/${queued.id}`,
+      headers: { cookie: owner.cookie },
+    });
+    expect(gone.statusCode).toBe(404);
   });
 });

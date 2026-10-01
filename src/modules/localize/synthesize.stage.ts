@@ -160,7 +160,8 @@ export function groupIntoUtterances(
       totalSpan === 0
         ? first.ttsHints.speakingRate
         : group.reduce(
-            (total, segment, i) => total + segment.ttsHints.speakingRate * (spans[i] ?? 0),
+            (total, segment, i) =>
+              total + segment.ttsHints.speakingRate * (spans[i] ?? 0),
             0
           ) / totalSpan;
 
@@ -412,16 +413,23 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
 
   const refits = planned
     .map((utterance, i) => ({ utterance, rate: fitRates[i] ?? null }))
-    .filter((entry): entry is { utterance: PlannedUtterance; rate: number } => entry.rate !== null);
+    .filter(
+      (entry): entry is { utterance: PlannedUtterance; rate: number } =>
+        entry.rate !== null
+    );
   done = 0;
   const second = await mapBounded(refits, SYNTH_CONCURRENCY, ({ utterance, rate }) =>
     take(utterance, rate, "b")
   );
-  const secondByIndex = new Map(refits.map((entry, i) => [entry.utterance.index, second[i]]));
+  const secondByIndex = new Map(
+    refits.map((entry, i) => [entry.utterance.index, second[i]])
+  );
 
   const kept = first.map((entry, i) => {
     const retake = secondByIndex.get(i);
-    return retake !== undefined && retake.durationSec < entry.durationSec ? retake : entry;
+    return retake !== undefined && retake.durationSec < entry.durationSec
+      ? retake
+      : entry;
   });
 
   const finalSlots = slots(kept.map((entry) => entry.durationSec));
@@ -522,7 +530,10 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
     segments,
     utterances,
     sourceDurationSec,
-    billedChars: utterances.reduce((total, utterance) => total + utterance.billedChars, 0),
+    billedChars: utterances.reduce(
+      (total, utterance) => total + utterance.billedChars,
+      0
+    ),
     measuredCharsPerSec: spokenChars / spokenSec,
   });
 

@@ -435,6 +435,39 @@ export async function probeHasPlayableVideo(filePath: string): Promise<boolean> 
 }
 
 /**
+ * One frame of the footage as a small JPEG, for the library grid.
+ *
+ * Taken a little way in rather than at 0 s, where lectures are often a black
+ * fade or a title card. 640 px wide is enough for a card at 2x density.
+ */
+export async function extractPoster(
+  videoPath: string,
+  outPath: string,
+  atSec: number
+): Promise<void> {
+  await run(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-nostats",
+      "-y",
+      "-ss",
+      atSec.toFixed(2),
+      "-i",
+      videoPath,
+      "-frames:v",
+      "1",
+      "-vf",
+      "scale=640:-2",
+      "-q:v",
+      "4",
+      outPath,
+    ],
+    { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
+  );
+}
+
+/**
  * The source footage with the synthesized audio under it.
  *
  * The picture is COPIED, not re-encoded: a two-minute 1080p re-encode on one

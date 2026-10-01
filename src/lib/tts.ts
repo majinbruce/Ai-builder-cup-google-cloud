@@ -148,9 +148,7 @@ function explainAuthFailure(error: unknown): Error {
  * quietly adds milliseconds at each join would corrupt the one number this phase
  * exists to produce. WAV throughout, one MP3 encode at the very end.
  */
-export async function synthesize(
-  options: SynthesizeOptions
-): Promise<SynthesizeResult> {
+export async function synthesize(options: SynthesizeOptions): Promise<SynthesizeResult> {
   const { input, voice = TTS_VOICE, speakingRate } = options;
 
   const rate = speakingRate === undefined ? 1.0 : clampSpeakingRate(speakingRate);

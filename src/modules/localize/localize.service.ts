@@ -10,6 +10,7 @@ import { AppError, badRequest, notFound } from "../../lib/errors.ts";
 import {
   encodeMp3,
   measureMeanVolumeDb,
+  extractPoster,
   muxVideoWithAudio,
   probeDurationSec,
   probeHasPlayableVideo,
@@ -17,6 +18,7 @@ import {
 import {
   createUploadTarget,
   deleteFile,
+  deleteJobFiles,
   downloadFile,
   fileSize,
   jobKey,
@@ -225,12 +227,27 @@ export async function createJobFromUpload(
       ? await putFile(uploadPath, jobKey(id, "source.mp4"))
       : undefined;
 
+    // The library card's thumbnail. Optional in the same way: a frame that
+    // will not extract leaves a card with an icon, not a refused upload.
+    let posterUri: string | undefined;
+    if (hasVideo) {
+      const poster = path.join(workDir, "poster.jpg");
+      posterUri = await extractPoster(uploadPath, poster, Math.min(2, durationSec / 4))
+        .then(() => putFile(poster, jobKey(id, "poster.jpg")))
+        .catch((err: unknown) => {
+          ctx.log.warn({ err }, "could not extract a poster frame");
+          return undefined;
+        });
+    }
+
     const row = await repo.insert(ctx.db, {
       id,
       userId,
       targetLanguage: TARGET_LANGUAGE,
       sourceUri,
+      sourceDurationSec: durationSec,
       ...(sourceVideoUri === undefined ? {} : { sourceVideoUri }),
+      ...(posterUri === undefined ? {} : { posterUri }),
     });
 
     ctx.log.info(
@@ -602,6 +619,30 @@ export async function listJobs(
   return { data: rows.map(repo.toSummary), page, limit, total };
 }
 
+/**
+ * Deletes a job and every file it has. Owner only, through the same
+ * WHERE-clause ownership as getJob, so another user's id is a 404.
+ *
+ * A job still running is refused: its runner holds the row and would go on
+ * writing files under a prefix this has just emptied. Files go before the row,
+ * so a failure between the two leaves a row that can be deleted again rather
+ * than files nothing points at.
+ */
+export async function deleteJob(ctx: Ctx, userId: string, id: string): Promise<void> {
+  const row = await repo.findForUser(ctx.db, id, userId);
+  if (row === null) throw notFound("Job not found");
+  if (row.status !== "done" && row.status !== "failed") {
+    throw new AppError(
+      "This video is still being localized. Delete it once it finishes.",
+      409
+    );
+  }
+
+  await deleteJobFiles(id);
+  await repo.deleteForUser(ctx.db, id, userId);
+  ctx.log.info({ jobId: id, wasDemo: row.isDemo }, "localize job deleted");
+}
+
 export async function getDemoJob(ctx: Ctx): Promise<Job> {
   const row = await repo.findDemo(ctx.db);
   if (row === null) {
@@ -616,6 +657,11 @@ export async function getDemoJob(ctx: Ctx): Promise<Job> {
  * Which stored file answers `/audio/:which` for a job, or a 404 if it does not
  * exist yet — a job still synthesizing has a source and no output.
  */
+export function posterUriFor(job: Job): string {
+  if (job.posterUri === null) throw notFound("This job has no poster frame.");
+  return job.posterUri;
+}
+
 export function videoUriFor(job: Job, which: AudioWhich): string {
   const uri = which === "source" ? job.sourceVideoUri : job.outputVideoUri;
   if (uri === null) {

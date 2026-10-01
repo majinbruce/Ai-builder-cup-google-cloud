@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  real,
   boolean,
   check,
   index,
@@ -210,6 +211,10 @@ export const localizeJobs = pgTable(
     sourceVideoUri: text("source_video_uri"),
     /** That footage with the Hindi audio under it, once synthesis is done. */
     outputVideoUri: text("output_video_uri"),
+    /** A frame from the footage for the library grid. Null for audio uploads. */
+    posterUri: text("poster_uri"),
+    /** The clip's length as ffprobe measured it at ingest. */
+    sourceDurationSec: real("source_duration_sec"),
     error: text("error"),
     analysis: jsonb("analysis"),
     /** Stage 1's emphasis claims scored against ffmpeg — ours, never the model's. */

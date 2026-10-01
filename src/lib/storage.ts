@@ -57,7 +57,7 @@ function getGcs(): Storage {
 /** The key layout for one job's files. The only place it is spelled out. */
 export const jobKey = (
   jobId: string,
-  file: "source.mp3" | "output.mp3" | "source.mp4" | "output.mp4"
+  file: "source.mp3" | "output.mp3" | "source.mp4" | "output.mp4" | "poster.jpg"
 ): string => `jobs/${jobId}/${file}`;
 
 /**
@@ -80,6 +80,7 @@ export function uriForKey(key: string): string {
 const CONTENT_TYPES: Record<string, string> = {
   ".mp3": "audio/mpeg",
   ".mp4": "video/mp4",
+  ".jpg": "image/jpeg",
 };
 
 type Location =
@@ -147,6 +148,22 @@ export async function deleteFile(uri: string): Promise<void> {
     .bucket(location.bucket)
     .file(location.key)
     .delete({ ignoreNotFound: true });
+}
+
+/**
+ * Deletes every file a job has, by its key prefix rather than a list of names,
+ * so a file type added later cannot be left behind by a delete written now.
+ */
+export async function deleteJobFiles(jobId: string): Promise<void> {
+  const prefix = `jobs/${jobId}/`;
+  const bucket = config.gcs.bucket;
+
+  if (bucket === null) {
+    await fsp.rm(path.join(LOCAL_ROOT, prefix), { recursive: true, force: true });
+    return;
+  }
+
+  await getGcs().bucket(bucket).deleteFiles({ prefix, force: true });
 }
 
 /** How long a signed upload URL stays valid. Long enough for 100 MB on a slow link. */
