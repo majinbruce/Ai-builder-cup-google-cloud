@@ -2,6 +2,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import multipart from "@fastify/multipart";
+import type { Readable } from "node:stream";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { config } from "../../config/index.ts";
@@ -22,12 +23,17 @@ import {
 } from "../../lib/storage.ts";
 import * as localizeService from "./localize.service.ts";
 import {
+  ACCEPTED_UPLOAD_TYPE,
+  CreateJobFromUploadBody,
+  CreateUploadBody,
   DemoAudioParams,
   Job,
   JobAudioParams,
   JobIdParams,
   JobSummary,
   ListJobsQuery,
+  UploadIdParams,
+  UploadTarget,
 } from "./localize.schemas.ts";
 
 /**
@@ -35,12 +41,20 @@ import {
  * /api/v1/localize — the permission model, in full
  * ============================================================================
  *
- *   POST  /jobs                     auth    upload a clip; 202 with the queued job
+ *   POST  /uploads                  auth    where to PUT a file (signed GCS URL); 201
+ *   PUT   /uploads/:uploadId        auth    local backend only: the PUT target itself
+ *   POST  /jobs/from-upload         auth    a finished upload becomes a job; 202
+ *   POST  /jobs                     auth    multipart upload (≤ 32 MiB on Cloud Run); 202
  *   GET   /jobs                     auth    YOUR jobs, newest first
  *   GET   /jobs/:id                 owner   the full job; the UI polls this
  *   GET   /jobs/:id/audio/:which    owner   source or output mp3, Range-aware
+ *   GET   /jobs/:id/video/:which    owner   source or output mp4, Range-aware
  *   GET   /demo                     public  the promoted demo job, full
  *   GET   /demo/audio/:which        public  its audio
+ *   GET   /demo/video/:which        public  its video
+ *
+ * Uploads are under uploads/<userId>/<uploadId>: the caller's id is in the key,
+ * so /jobs/from-upload with somebody else's upload id finds nothing.
  *
  * "owner" is enforced in the SQL WHERE clause (localize.repository.ts
  * findForUser), not by loading the row and comparing — so somebody else's job
@@ -64,7 +78,6 @@ import {
  */
 const UPLOADS_PER_HOUR = 20;
 
-const ACCEPTED_TYPES = /^(audio\/[\w.+-]+|video\/mp4)$/;
 
 const jobEnvelope = successEnvelope(Job);
 const commonErrors = { 400: errorEnvelope, 401: errorEnvelope, 500: errorEnvelope };
@@ -75,17 +88,18 @@ export interface LocalizeRoutesOptions {
 }
 
 /**
- * Streams one stored mp3, honouring a single byte range.
+ * Streams one stored mp3 or mp4, honouring a single byte range.
  *
  * Range is not an optimisation here, it is a feature: the reasoning panel plays
  * one segment by seeking the player to that segment's start, and a media
  * element can only seek into a resource whose server answers ranges. Without
  * this, "play this segment" would restart the file from zero.
  */
-async function sendAudio(
+async function sendMedia(
   request: FastifyRequest,
   reply: FastifyReply,
   uri: string,
+  contentType: "audio/mpeg" | "video/mp4",
   cacheControl = "private, max-age=3600"
 ): Promise<FastifyReply> {
   const size = await fileSize(uri);
@@ -93,7 +107,7 @@ async function sendAudio(
 
   reply
     .header("accept-ranges", "bytes")
-    .header("content-type", "audio/mpeg")
+    .header("content-type", contentType)
     // Private by default: every one of these is behind a session except the
     // demo, and a shared cache keyed without the cookie would serve one user's
     // lecture to another.
@@ -184,7 +198,7 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
         ]);
       }
 
-      if (!ACCEPTED_TYPES.test(part.mimetype)) {
+      if (!ACCEPTED_UPLOAD_TYPE.test(part.mimetype)) {
         // Drain what the client is sending, or the socket stalls on the unread body.
         part.file.resume();
         throw new AppError(
@@ -233,6 +247,124 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
       } finally {
         await fsp.rm(uploadDir, { recursive: true, force: true });
       }
+    }
+  );
+
+  /**
+   * Direct upload, step 1. Shares the per-hour limiter's budget with the
+   * multipart route in spirit but not in key: a direct upload makes two POSTs
+   * (this and /jobs/from-upload), and counting both against one key would
+   * halve the hour.
+   */
+  app.post(
+    "/uploads",
+    {
+      config: {
+        rateLimit: {
+          max: UPLOADS_PER_HOUR,
+          timeWindow: "1 hour",
+          keyGenerator: (request) => `localize-uploads:${request.user?.id ?? request.ip}`,
+        },
+      },
+      schema: {
+        tags: ["localize"],
+        summary: "Get a URL to upload a clip to directly",
+        description:
+          "Returns a V4 signed GCS PUT URL valid for 15 minutes. Send the file with " +
+          "exactly the returned headers, then POST /jobs/from-upload with the uploadId. " +
+          `At most ${config.limits.maxUploadBytes} bytes; audio/* or video/mp4.`,
+        security: [{ cookieAuth: [] }, { bearerAuth: [] }],
+        body: CreateUploadBody,
+        response: {
+          201: successEnvelope(UploadTarget),
+          413: errorEnvelope,
+          429: errorEnvelope,
+          ...commonErrors,
+        },
+      },
+    },
+    async (request, reply) => {
+      const user = requireUser(request);
+      const ctx = { db: app.db, log: request.log };
+      const target = await localizeService.createUpload(ctx, user.id, request.body);
+      return reply.code(201).send(ok(target, "Upload URL created"));
+    }
+  );
+
+  /**
+   * The local backend's PUT target. Not registered with a bucket configured:
+   * there the browser PUTs to GCS, and an API route accepting uploads would be
+   * a way around the signed URL's length range.
+   */
+  if (config.gcs.bucket === null) {
+    // Hand the raw body to the handler as a stream instead of buffering it.
+    // bodyLimit does not apply to a passthrough parser; receiveLocalUpload
+    // counts the bytes itself.
+    app.addContentTypeParser(ACCEPTED_UPLOAD_TYPE, (_request, payload, done) => {
+      done(null, payload);
+    });
+
+    app.put(
+      "/uploads/:uploadId",
+      {
+        schema: {
+          tags: ["localize"],
+          summary: "Local development only: receive a direct upload",
+          security: [{ cookieAuth: [] }, { bearerAuth: [] }],
+          params: UploadIdParams,
+          response: {
+            200: successEnvelope(UploadIdParams),
+            413: errorEnvelope,
+            415: errorEnvelope,
+            ...commonErrors,
+          },
+        },
+      },
+      async (request) => {
+        const user = requireUser(request);
+        const body = request.body as Readable | undefined;
+        if (body === undefined || typeof body.pipe !== "function") {
+          throw new AppError("Send the file as the raw body with its audio/video type.", 415);
+        }
+        await localizeService.receiveLocalUpload(user.id, request.params.uploadId, body);
+        return ok({ uploadId: request.params.uploadId }, "Upload received");
+      }
+    );
+  }
+
+  app.post(
+    "/jobs/from-upload",
+    {
+      config: {
+        rateLimit: {
+          max: UPLOADS_PER_HOUR,
+          timeWindow: "1 hour",
+          keyGenerator: (request) => `localize-jobs:${request.user?.id ?? request.ip}`,
+        },
+      },
+      schema: {
+        tags: ["localize"],
+        summary: "Start a localization job from a finished direct upload",
+        security: [{ cookieAuth: [] }, { bearerAuth: [] }],
+        body: CreateJobFromUploadBody,
+        response: {
+          202: jobEnvelope,
+          404: errorEnvelope,
+          413: errorEnvelope,
+          429: errorEnvelope,
+          ...commonErrors,
+        },
+      },
+    },
+    async (request, reply) => {
+      const user = requireUser(request);
+      const ctx = { db: app.db, log: request.log };
+      const { job } = await localizeService.createJobFromStoredUpload(ctx, {
+        userId: user.id,
+        uploadId: request.body.uploadId,
+        ...(opts.stages === undefined ? {} : { stages: opts.stages }),
+      });
+      return reply.code(202).send(ok(job, "Job queued"));
     }
   );
 
@@ -297,10 +429,36 @@ const securedLocalizeRoutes: FastifyPluginAsyncZod<LocalizeRoutesOptions> = asyn
       const ctx = { db: app.db, log: request.log };
       const job = await localizeService.getJob(ctx, user.id, request.params.id);
 
-      return sendAudio(
+      return sendMedia(
         request,
         reply,
-        localizeService.audioUriFor(job, request.params.which)
+        localizeService.audioUriFor(job, request.params.which),
+        "audio/mpeg"
+      );
+    }
+  );
+
+  app.get(
+    "/jobs/:id/video/:which",
+    {
+      schema: {
+        tags: ["localize"],
+        summary: "Stream a job's source or Hindi video (Range-aware)",
+        security: [{ cookieAuth: [] }, { bearerAuth: [] }],
+        params: JobAudioParams,
+        response: { 404: errorEnvelope, ...commonErrors },
+      },
+    },
+    async (request, reply) => {
+      const user = requireUser(request);
+      const ctx = { db: app.db, log: request.log };
+      const job = await localizeService.getJob(ctx, user.id, request.params.id);
+
+      return sendMedia(
+        request,
+        reply,
+        localizeService.videoUriFor(job, request.params.which),
+        "video/mp4"
       );
     }
   );
@@ -334,12 +492,35 @@ const publicDemoRoutes: FastifyPluginAsyncZod = async (app) => {
     },
     async (request, reply) => {
       const job = await localizeService.getDemoJob({ db: app.db, log: request.log });
-      return sendAudio(
+      return sendMedia(
         request,
         reply,
         localizeService.audioUriFor(job, request.params.which),
+        "audio/mpeg",
         // Not cached: the URL stays the same when a different job is promoted,
         // and an hour-long max-age would keep playing the previous demo's audio.
+        "no-cache"
+      );
+    }
+  );
+
+  app.get(
+    "/demo/video/:which",
+    {
+      schema: {
+        tags: ["localize"],
+        summary: "The demo job's video (Range-aware)",
+        params: DemoAudioParams,
+        response: { 400: errorEnvelope, 404: errorEnvelope, 500: errorEnvelope },
+      },
+    },
+    async (request, reply) => {
+      const job = await localizeService.getDemoJob({ db: app.db, log: request.log });
+      return sendMedia(
+        request,
+        reply,
+        localizeService.videoUriFor(job, request.params.which),
+        "video/mp4",
         "no-cache"
       );
     }

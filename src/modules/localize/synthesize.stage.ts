@@ -2,12 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { concatAudio, encodeMp3, probeDurationSec } from "../../lib/ffmpeg.ts";
-import {
-  TTS_VOICE,
-  clampSpeakingRate,
-  synthesize,
-  type TtsInput,
-} from "../../lib/tts.ts";
+import { TTS_VOICE, clampSpeakingRate, synthesize } from "../../lib/tts.ts";
+import { readPcmFormat, silenceWav } from "../../lib/wav.ts";
 import { countSpokenChars, findLatinRuns } from "./drift.ts";
 import { Synthesis } from "./localize.schemas.ts";
 import type {
@@ -16,6 +12,7 @@ import type {
   Analysis,
   AnalyzedSegment,
   SynthesizedSegment,
+  SynthesizedUtterance,
 } from "./localize.schemas.ts";
 
 /**
@@ -23,205 +20,261 @@ import type {
  * Stage 4 of docs/SPEC.md section b — the teacher's delivery, rebuilt.
  * ============================================================================
  *
- * This is the stage where three phases of annotation stop being JSON and become
- * something a learner can hear. Stage 1 measured where the speaker paused and
- * what they leaned on; stage 2 decided, per segment, a `speakingRate`, a
- * `pauseBefore` and a list of Hindi tokens carrying the stress. Everything below
- * turns those three fields into markup and sends it to Chirp 3 HD.
+ * Stage 1 measured where the speaker paused and what they leaned on; stage 2
+ * decided, per segment, a `speakingRate` and a `pauseBefore`. This stage turns
+ * those into Chirp 3 HD audio laid on the SOURCE timeline, so the Hindi is as
+ * long as the English and in step with the video it will play over.
  *
- * The split mirrors lib/ffmpeg.ts vs acoustics.ts and lib/gemini.ts vs the other
- * stages: lib/tts.ts shells out and returns bytes, and every decision about WHAT
- * to say lives here as pure, exported, unit-tested functions. buildTtsInput()
- * takes no client and performs no I/O, because `markupUsed` in the audit panel
- * is a claim about a request and a test has to be able to read that request
- * without a credential.
+ * The split mirrors lib/ffmpeg.ts vs acoustics.ts: lib/tts.ts returns bytes,
+ * and every decision about what to send and where to put it is a pure, exported,
+ * unit-tested function here (groupIntoUtterances, planFit, placeOnTimeline).
  *
- * WHAT CHIRP 3 HD ACTUALLY HONOURS, and how much it cost to find out.
+ * WHAT CHIRP 3 HD HONOURS (Phase 3 spike, docs/research.md): `speaking_rate`
+ * (0.85 -> +17.2%) and `<break time>`; inline `<prosody>`/`<emphasis>` are
+ * accepted, ignored, and insert ~1.4 s of dead time each.
  *
- * docs/SPEC.md section b left this conditional — "SSML prosody if the Phase 3
- * spike confirms Chirp 3 HD honors it" — because Google documented three
- * different answers. src/scripts/spike-tts.ts settled it, but not on the first
- * try, and the wrong answer shipped into this file before the right one did.
- * The sequence is recorded because the mistake is instructive:
+ * WHAT CHANGED ON 2026-10-01, from listening to the deployed demo. Two things
+ * were audible, and both came from treating a pedagogical segment as a unit of
+ * speech:
  *
- *   1. `<break time="3s"/>` added 3.71 s — a predicted magnitude, hit. Read as
- *      "SSML is honoured", and this stage was built wrapping every stressed term
- *      in `<prosody rate="0.85">`.
- *   2. That build made the fixture 41% longer than its source span. Two 350 ms
- *      breaks and sixteen rate wrappers cannot cost 24 seconds, so the number
- *      was not drift — it was a bug reporting itself.
- *   3. The no-op control found it. `<prosody rate="1.0">` asks for the rate the
- *      voice already uses and must therefore change nothing; it added 12.8%,
- *      as much as `rate="slow"` did. Two wrappers cost 1.69x one.
+ *   1. Segment ends sounded final. Each segment was its own TTS request, and
+ *      Chirp 3 HD speaks every request as a complete utterance — so a segment
+ *      that ends mid-sentence on a comma got a full stop's falling ending, and
+ *      the next request restarted from a neutral voice.
+ *   2. An inline `<break>` did the same thing mid-segment. The 150 ms pause this
+ *      stage placed before one emphasized term per segment came out as a
+ *      0.64-1.07 s hole (silencedetect on the demo output) with the voice
+ *      restarting after it; re-synthesizing without it removed the hole.
  *
- * So: Chirp 3 HD on hi-IN parses SSML STRUCTURE and ignores inline `<prosody>`'s
- * rate ATTRIBUTE. Each inline tag inserts roughly 1.4 s of dead time at its own
- * position, whatever it says. `<break>` appeared to work for the same reason
- * every other tag appeared to work — inserting time is simply what `<break>`
- * means, so for that one tag the artifact and the intent coincide.
+ * Those holes and restarts were also most of the length overrun: 70.1 s of
+ * Hindi for 62.6 s of English, where the text alone measures +1.2%.
  *
- * WHAT THIS STAGE THEREFORE USES, every element measured on this voice:
- *
- *   - segment rate: `audioConfig.speaking_rate` (rate 0.85 -> +17.2%, real).
- *   - pauses: `<break time>` (350 ms leading -> +0.30 s measured; accurate).
- *   - emphasis: a short `<break>` before ONE term per segment. See below.
- *
- * WHAT IT DELIBERATELY DOES NOT USE: inline `<prosody>` and `<emphasis>`, which
- * cannot stress a term on this voice and actively harm the audio by punching a
- * hole beside every word they touch; and `[pause short|long]` markup, which
- * docs/research.md listed as supported for hi-IN and which the spike measured
- * producing NO silence at all in the leading position (-2.8%, inside the noise
- * floor). research.md is corrected rather than worked around, per CLAUDE.md.
+ * So: segments are grouped into UTTERANCES that end where a sentence ends; the
+ * request is plain text with no tags; every pause is silence written here, where
+ * its length is exact; and each utterance is fitted to the source time it
+ * replaces — one faster re-take when it would run into the next one.
  */
 
 /**
- * Pause lengths for `AdaptedSegment.ttsHints.pauseBefore`.
+ * Pause lengths for `AdaptedSegment.ttsHints.pauseBefore`, in ms of silence.
  *
- * Real numbers rather than SSML's named strengths because the spike measured
- * `<break time>` accurately enough to trust the number, and because a named
- * strength is the model's vocabulary while this is the pipeline's decision. 350
- * ms is a clause boundary; 700 ms is the "here comes something" beat that stage
- * 1 detects before definitions and warnings — comfortably above the 200 ms floor
- * acoustics.ts uses to tell a pedagogical pause from a stop consonant.
+ * 350 ms is a clause boundary; 700 ms is the "here comes something" beat stage 1
+ * detects before definitions and warnings. Inserted as silence between TTS calls
+ * rather than as `<break>`, so the number is exactly what is heard.
  */
 export const PAUSE_MS = { none: 0, short: 350, long: 700 } as const;
 
 /**
- * The pause placed before an emphasized term, in milliseconds requested.
+ * The request ceiling per utterance, in UTF-8 bytes.
  *
- * This is the ONE prosodic device available for marking a term on this voice,
- * and it is a real one: pausing immediately before a word is what a teacher does
- * when they want it to land ("and the answer is ... idempotent"). It is not the
- * same thing as stressing the word, and nothing in this pipeline says it is.
- *
- * 150 ms is what gets REQUESTED; the spike measured an inline break costing
- * roughly 0.59 s more than it asks for, so the audible beat is around 0.7 s.
- * Requesting the small number and reporting the measured one is the honest way
- * round: `markupUsed` shows what was asked, `measuredDurationSec` shows what
- * happened.
- *
- * ONE term per segment, not all of them. Two reasons, and neither is cost. A
- * speaker has one prosodic peak per breath group — marking four words in a
- * ten-second sentence is not emphasis, it is a stutter — and at ~0.7 s each,
- * sixteen of them added 37% to the fixture, which is the bug that started this
- * comment.
+ * Cloud TTS caps `input` at 5,000 bytes, and Devanagari is 3 bytes a character,
+ * so ~1,650 characters. 4,000 leaves headroom and still holds a long sentence:
+ * the fixture's longest group is ~650 bytes.
  */
-export const EMPHASIS_PAUSE_MS = 150;
+export const MAX_UTTERANCE_BYTES = 4000;
 
-/** Escapes text for inclusion in an SSML document. */
-export function escapeSsml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+/** An overrun this small is take-to-take noise (measured ±3%), not worth a re-take. */
+export const FIT_TOLERANCE = 0.02;
+
+/**
+ * A re-take aims this far under its target, so noise in the second take lands it
+ * inside the deadline rather than just past it.
+ */
+export const FIT_AIM = 0.97;
+
+/**
+ * The most a re-take may speed an utterance up, relative to the adapter's rate.
+ *
+ * Fifteen percent is roughly where a learner stops hearing "brisk" and starts
+ * hearing "rushed". Past it, the overrun is kept and pushes later utterances
+ * back: the output runs a little long rather than becoming hard to follow,
+ * which would defeat the point of the pipeline. Capped absolutely at the top of
+ * stage 2's own range as well.
+ */
+export const MAX_FIT_SPEEDUP = 1.15;
+export const MAX_FIT_RATE = 1.3;
+
+/** Sentence-final punctuation, allowing closing quotes or brackets after it. */
+const SENTENCE_END = /[।॥?!.][\s"'”’)\]]*$/u;
+
+export function endsSentence(text: string): boolean {
+  return SENTENCE_END.test(text.trim());
 }
 
-export interface BuiltTtsInput {
-  input: TtsInput;
-  speakingRate: number;
-  /** Terms stage 2 asked to stress that do not occur in its own targetText. */
-  emphasisNotFound: string[];
-  /** The leading pause actually requested, in ms. Zero when pauseBefore is none. */
+export interface PlannedUtterance {
+  index: number;
+  segments: AdaptedSegment[];
+  /** Exactly what is sent: the segments' Hindi, space-joined. */
+  text: string;
+  requestedRate: number;
   pauseBeforeMs: number;
-  /** The single term given a pause, or null when the segment had none usable. */
-  emphasisPausedTerm: string | null;
-  /**
-   * Terms present in the Hindi that got no acoustic treatment at all.
-   *
-   * They are still highlighted in the reasoning panel, so this is not the same as
-   * being discarded — but the audio does nothing for them, and a panel claiming
-   * to show what was applied has to be able to say so.
-   */
-  emphasisNotRealized: string[];
+  sourceStartSec: number;
 }
 
 /**
- * Builds the exact request for one segment. Pure; no client, no I/O.
+ * Groups consecutive segments into the units actually spoken. Pure.
  *
- * Order matters. The Hindi is XML-escaped ONCE, before any tag is inserted —
- * escaping afterwards would escape our own tags into literal text. Then the
- * emphasis break goes in, then the leading break.
+ * A new utterance starts when the previous segment ended a sentence, when this
+ * segment asks for a pause (the pause sits between calls, where it is exact, and
+ * the teacher's beat is a natural place to breathe), or when adding it would pass
+ * MAX_UTTERANCE_BYTES.
  *
- * A term absent from `targetText` is collected into `emphasisNotFound` rather
- * than silently skipped: that is the adapter having claimed stress on a string it
- * did not write, and the CLI prints it.
+ * The rate is the adapter's per-segment rates weighted by source span: a 2 s
+ * aside at 1.1 should not pull a 10 s definition at 0.85 halfway up.
  */
-export function buildTtsInput(segment: AdaptedSegment): BuiltTtsInput {
-  const { targetText, emphasisTerms, ttsHints } = segment;
+export function groupIntoUtterances(
+  segments: readonly AdaptedSegment[],
+  sourceById: ReadonlyMap<string, AnalyzedSegment>
+): PlannedUtterance[] {
+  const groups: AdaptedSegment[][] = [];
+  let current: AdaptedSegment[] = [];
+  let bytes = 0;
 
-  const emphasisNotFound = emphasisTerms.filter((term) => !targetText.includes(term));
+  for (const segment of segments) {
+    const previous = current.at(-1);
+    const segmentBytes = Buffer.byteLength(segment.targetText, "utf8") + 1;
+    const startsNew =
+      previous === undefined ||
+      endsSentence(previous.targetText) ||
+      segment.ttsHints.pauseBefore !== "none" ||
+      bytes + segmentBytes > MAX_UTTERANCE_BYTES;
 
-  const present = emphasisTerms.filter(
-    (term) => term.trim() !== "" && targetText.includes(term)
-  );
-
-  let body = escapeSsml(targetText);
-
-  /**
-   * The first present term gets the pause; the rest get nothing.
-   *
-   * First rather than longest or "strongest": stage 2 emits emphasisTerms in the
-   * order it considered them, which tracks the order they occur in the sentence,
-   * and the earliest one is the one a listener has not yet been given a reason to
-   * expect. Strength would be the better criterion and is not available here —
-   * `AnalyzedSegment.emphasis[].strength` describes the ENGLISH terms, and there
-   * is no reliable mapping from those to the Hindi tokens stage 2 chose. Picking
-   * on a criterion we do not have would be inventing one.
-   */
-  const paused = present[0] ?? null;
-
-  if (paused !== null) {
-    const escaped = escapeSsml(paused);
-    // Only the first occurrence: a word said five times is not stressed five
-    // times.
-    body = body.replace(escaped, `<break time="${EMPHASIS_PAUSE_MS}ms"/>${escaped}`);
+    if (startsNew && current.length > 0) {
+      groups.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(segment);
+    bytes += segmentBytes;
   }
+  if (current.length > 0) groups.push(current);
 
-  const pauseMs = PAUSE_MS[ttsHints.pauseBefore];
-  const lead = pauseMs === 0 ? "" : `<break time="${pauseMs}ms"/>`;
+  return groups.map((group, index) => {
+    const first = group[0] as AdaptedSegment;
+    const spans = group.map((segment) => {
+      const source = sourceById.get(segment.id);
+      return source === undefined ? 0 : source.endSec - source.startSec;
+    });
+    const totalSpan = spans.reduce((total, span) => total + span, 0);
+    const requestedRate =
+      totalSpan === 0
+        ? first.ttsHints.speakingRate
+        : group.reduce(
+            (total, segment, i) => total + segment.ttsHints.speakingRate * (spans[i] ?? 0),
+            0
+          ) / totalSpan;
 
-  return {
-    input: { mode: "ssml", content: `<speak>${lead}${body}</speak>` },
-    speakingRate: clampSpeakingRate(ttsHints.speakingRate),
-    pauseBeforeMs: pauseMs,
-    emphasisNotFound,
-    emphasisPausedTerm: paused,
-    emphasisNotRealized: paused === null ? [] : present.slice(1),
-  };
+    return {
+      index,
+      segments: group,
+      text: group.map((segment) => segment.targetText.trim()).join(" "),
+      requestedRate: clampSpeakingRate(Math.round(requestedRate * 1000) / 1000),
+      pauseBeforeMs: PAUSE_MS[first.ttsHints.pauseBefore],
+      sourceStartSec: sourceById.get(first.id)?.startSec ?? 0,
+    };
+  });
+}
+
+/** One utterance as the timeline sees it. */
+export interface TimelineSlot {
+  sourceStartSec: number;
+  deadlineSec: number;
+  pauseBeforeMs: number;
+  durationSec: number;
+}
+
+/**
+ * Where each utterance goes in the output. Pure.
+ *
+ * An utterance starts at its source start, or — if the previous one ran long, or
+ * its pause does not fit in the gap left — right after the previous one plus its
+ * pause. It never starts EARLY: the Hindi for a slide is not spoken over the
+ * previous slide.
+ */
+export function placeOnTimeline(slots: readonly TimelineSlot[]): {
+  startSec: number[];
+  endSec: number;
+} {
+  const startSec: number[] = [];
+  let cursor = 0;
+  for (const slot of slots) {
+    const start = Math.max(slot.sourceStartSec, cursor + slot.pauseBeforeMs / 1000);
+    startSec.push(start);
+    cursor = start + slot.durationSec;
+  }
+  return { startSec, endSec: cursor };
+}
+
+/**
+ * Which utterances need a faster re-take, and at what rate. Pure.
+ *
+ * Walks the timeline with first-take durations. An utterance that would end past
+ * its deadline by more than FIT_TOLERANCE gets a rate that should land it at
+ * FIT_AIM of the time it has — speaking_rate scales duration close to linearly
+ * on this voice (0.85 measured +17.2%, against 1/0.85 = +17.6%) — capped by
+ * MAX_FIT_SPEEDUP. Its EXPECTED duration then carries forward, so a refit early
+ * in the clip is not double-counted against the next utterance.
+ *
+ * Returns null for an utterance that fits.
+ */
+export function planFit(
+  slots: readonly TimelineSlot[],
+  rates: readonly number[]
+): (number | null)[] {
+  let cursor = 0;
+  return slots.map((slot, i) => {
+    const rate = rates[i] ?? 1;
+    const start = Math.max(slot.sourceStartSec, cursor + slot.pauseBeforeMs / 1000);
+    const available = slot.deadlineSec - start;
+
+    if (start + slot.durationSec <= slot.deadlineSec + available * FIT_TOLERANCE) {
+      cursor = start + slot.durationSec;
+      return null;
+    }
+
+    const wanted =
+      available <= 0 ? Infinity : (rate * slot.durationSec) / (available * FIT_AIM);
+    const fitRate = Math.min(wanted, rate * MAX_FIT_SPEEDUP, MAX_FIT_RATE);
+    if (fitRate <= rate) {
+      cursor = start + slot.durationSec;
+      return null;
+    }
+    const rounded = Math.round(fitRate * 1000) / 1000;
+    cursor = start + (slot.durationSec * rate) / rounded;
+    return rounded;
+  });
 }
 
 export interface SynthesizeInput {
   analysis: Analysis;
   adaptation: Adaptation;
-  /** Where per-segment WAVs and the final mp3 are written. */
+  /** Where utterance WAVs and the final mp3 are written. */
   outDir: string;
+  /**
+   * The source clip's full length, which the output is padded to. Defaults to
+   * the last segment's end, which loses only trailing silence.
+   */
+  sourceDurationSec?: number;
   voice?: string;
-  onSegment?: (segment: AdaptedSegment, index: number, total: number) => void;
+  onProgress?: (done: number, total: number) => void;
 }
 
 export interface SynthesizeOutput {
   synthesis: Synthesis;
-  /** Per-segment WAV paths, kept so the UI can play one segment alone. */
-  segmentFiles: string[];
+  /** Per-utterance WAV paths (the kept take), in order. */
+  utteranceFiles: string[];
 }
 
 /**
- * How many segments are synthesized at once.
- *
- * Phase 3 ran them one at a time on purpose, to get a readable per-segment
- * number first (1.4-2.6 s each, ~16 s for the fixture's eight). Unlike adapt,
- * these calls are genuinely independent — no segment's audio depends on
- * another's — so Phase 4 pulls the lever research.md left for it. Four rather
- * than "all": a 180 s clip is up to ~45 segments, and 45 simultaneous requests
- * is how a per-minute quota gets found.
+ * How many TTS calls are in flight at once. Calls are independent; four rather
+ * than "all" because a 180 s clip is up to ~45 requests, and 45 at once is how a
+ * per-minute quota gets found.
  */
 export const SYNTH_CONCURRENCY = 4;
 
 /**
  * Runs `task` over `items` with at most `limit` in flight, results in INPUT
- * order. Order is the whole requirement: the concat below joins files in array
- * order, and a segment finishing early must not move in the lecture.
+ * order — the timeline is built in array order, so order is the requirement.
  */
 async function mapBounded<T, R>(
   items: readonly T[],
@@ -230,9 +283,8 @@ async function mapBounded<T, R>(
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
-  // Set by the first failure. Promise.all rejects at once, but without this the
-  // other workers would keep starting (and billing) calls for a run that has
-  // already failed, writing into a scratch dir the caller is deleting.
+  // Set by the first failure, so other workers stop starting (and billing)
+  // calls for a run that has already failed.
   let failed = false;
 
   const worker = async () => {
@@ -251,32 +303,37 @@ async function mapBounded<T, R>(
   return results;
 }
 
+interface Take {
+  file: string;
+  audio: Buffer;
+  durationSec: number;
+  speakingRate: number;
+  billedChars: number;
+  latencyMs: number;
+}
+
 /**
- * Synthesizes every segment, joins them, and measures the result.
+ * Synthesizes, fits and places every utterance, then joins and measures.
  *
- * Up to SYNTH_CONCURRENCY segments in flight; see the constant for why.
- * Each segment's `latencyMs` is still its own call's latency, so the
- * per-segment cost reads the same as in Phase 3 — only the wall clock changes.
+ * Two rounds of calls: every utterance at its requested rate, then a faster
+ * re-take of only those planFit() says miss their deadline. A re-take that comes
+ * back no shorter than the first (Chirp 3 HD is generative; durations vary ±3%
+ * take to take) is discarded and the first kept.
  */
 export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeOutput> {
-  const { analysis, adaptation, outDir, voice = TTS_VOICE, onSegment } = input;
+  const { analysis, adaptation, outDir, voice = TTS_VOICE, onProgress } = input;
 
   const sourceById = new Map<string, AnalyzedSegment>(
     analysis.segments.map((segment) => [segment.id, segment])
   );
 
-  fs.mkdirSync(outDir, { recursive: true });
-  const segmentDir = path.join(outDir, "segments");
-  fs.mkdirSync(segmentDir, { recursive: true });
-
   /**
    * Every segment is checked before ANY is sent. With calls in flight
-   * concurrently, a check inside the task would let the segments already
-   * dispatched finish and bill while the run was failing anyway.
+   * concurrently, a check inside the task would let calls already dispatched
+   * finish and bill while the run was failing anyway.
    */
   for (const adapted of adaptation.segments) {
-    const source = sourceById.get(adapted.id);
-    if (source === undefined) {
+    if (!sourceById.has(adapted.id)) {
       throw new Error(
         `No analyzed segment for "${adapted.id}", so it has no time range. The ` +
           "analysis and adaptation are from different runs."
@@ -284,9 +341,7 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
     }
 
     // The Devanagari-only rule is a synthesis constraint, so this is where it is
-    // last enforceable. Phase 2's retry gate already sends Latin-script segments
-    // back once; a segment that still has it at this point would be silently
-    // mispronounced by a hi-IN voice, and the run should say so instead.
+    // last enforceable: a hi-IN voice would silently mispronounce Latin script.
     const latin = findLatinRuns(adapted.targetText);
     if (latin.length > 0) {
       throw new Error(
@@ -298,78 +353,165 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
     }
   }
 
-  const synthesized = await mapBounded(
-    adaptation.segments,
-    SYNTH_CONCURRENCY,
-    (adapted, index) => synthesizeOne(adapted, index)
+  fs.mkdirSync(outDir, { recursive: true });
+  const utteranceDir = path.join(outDir, "utterances");
+  fs.mkdirSync(utteranceDir, { recursive: true });
+
+  const planned = groupIntoUtterances(adaptation.segments, sourceById);
+  const lastSegment = analysis.segments.at(-1) as AnalyzedSegment;
+  const sourceDurationSec = Math.max(
+    input.sourceDurationSec ?? lastSegment.endSec,
+    lastSegment.endSec
   );
 
-  const segments = synthesized.map((entry) => entry.segment);
-  const segmentFiles = synthesized.map((entry) => entry.file);
-
-  async function synthesizeOne(
-    adapted: AdaptedSegment,
-    index: number
-  ): Promise<{ segment: SynthesizedSegment; file: string }> {
-    const source = sourceById.get(adapted.id) as AnalyzedSegment;
-
-    onSegment?.(adapted, index, adaptation.segments.length);
-
-    const built = buildTtsInput(adapted);
-
+  let done = 0;
+  const take = async (
+    utterance: PlannedUtterance,
+    rate: number,
+    label: string
+  ): Promise<Take> => {
     const result = await synthesize({
-      input: built.input,
+      input: { mode: "text", content: utterance.text },
       voice,
-      speakingRate: built.speakingRate,
+      speakingRate: rate,
     });
-
-    // Named by position, not by id: the id came from the model, and a file name
-    // built from it is one duplicate away from overwriting another segment.
-    const file = path.join(segmentDir, `${String(index).padStart(3, "0")}.wav`);
+    // Named by position, not by id: ids came from the model, and a file name
+    // built from one is a duplicate away from overwriting another.
+    const file = path.join(
+      utteranceDir,
+      `${String(utterance.index).padStart(3, "0")}-${label}.wav`
+    );
     fs.writeFileSync(file, result.audio);
-
-    const segment: SynthesizedSegment = {
-      id: adapted.id,
-      startSec: source.startSec,
-      endSec: source.endSec,
-      voice: result.voice,
+    onProgress?.(++done, planned.length);
+    return {
+      file,
+      audio: result.audio,
+      durationSec: await probeDurationSec(file),
       speakingRate: result.speakingRate,
-      markupUsed: built.input.content,
-      inputMode: built.input.mode,
-      measuredDurationSec: await probeDurationSec(file),
       billedChars: result.billedChars,
       latencyMs: result.latencyMs,
-      pauseBeforeMs: built.pauseBeforeMs,
-      emphasisNotFound: built.emphasisNotFound,
-      emphasisPausedTerm: built.emphasisPausedTerm,
-      emphasisNotRealized: built.emphasisNotRealized,
     };
+  };
 
-    return { segment, file };
-  }
+  const first = await mapBounded(planned, SYNTH_CONCURRENCY, (utterance) =>
+    take(utterance, utterance.requestedRate, "a")
+  );
+
+  const slots = (durations: readonly number[]): TimelineSlot[] =>
+    planned.map((utterance, i) => ({
+      sourceStartSec: utterance.sourceStartSec,
+      deadlineSec: planned[i + 1]?.sourceStartSec ?? sourceDurationSec,
+      pauseBeforeMs: utterance.pauseBeforeMs,
+      durationSec: durations[i] ?? 0,
+    }));
+
+  const fitRates = planFit(
+    slots(first.map((entry) => entry.durationSec)),
+    first.map((entry) => entry.speakingRate)
+  );
+
+  const refits = planned
+    .map((utterance, i) => ({ utterance, rate: fitRates[i] ?? null }))
+    .filter((entry): entry is { utterance: PlannedUtterance; rate: number } => entry.rate !== null);
+  done = 0;
+  const second = await mapBounded(refits, SYNTH_CONCURRENCY, ({ utterance, rate }) =>
+    take(utterance, rate, "b")
+  );
+  const secondByIndex = new Map(refits.map((entry, i) => [entry.utterance.index, second[i]]));
+
+  const kept = first.map((entry, i) => {
+    const retake = secondByIndex.get(i);
+    return retake !== undefined && retake.durationSec < entry.durationSec ? retake : entry;
+  });
+
+  const finalSlots = slots(kept.map((entry) => entry.durationSec));
+  const placed = placeOnTimeline(finalSlots);
+
+  /**
+   * The join: silence up to each utterance's start, the utterance, and silence
+   * to the source's end. Silence is written in the TTS output's own format, read
+   * from its header, so the concat demuxer's `-c copy` stays a byte-level join.
+   */
+  const format = readPcmFormat((kept[0] as Take).audio);
+  const parts: string[] = [];
+  let cursor = 0;
+  const gap = (sec: number, name: string) => {
+    if (sec < 0.001) return;
+    const file = path.join(utteranceDir, `${name}.silence.wav`);
+    fs.writeFileSync(file, silenceWav(sec, format));
+    parts.push(file);
+  };
+  kept.forEach((entry, i) => {
+    const start = placed.startSec[i] ?? cursor;
+    gap(start - cursor, `${String(i).padStart(3, "0")}`);
+    parts.push(entry.file);
+    cursor = start + entry.durationSec;
+  });
+  gap(sourceDurationSec - cursor, "tail");
 
   const joinedWav = path.join(outDir, "output.wav");
   const outputMp3 = path.join(outDir, "output.mp3");
-
-  await concatAudio(segmentFiles, joinedWav);
+  await concatAudio(parts, joinedWav);
   await encodeMp3(joinedWav, outputMp3);
-
   const durationSec = await probeDurationSec(outputMp3);
 
-  /**
-   * Characters per second, measured rather than assumed.
-   *
-   * Divided by the summed SEGMENT durations, not by the final file's, so the
-   * number describes speech rather than speech plus whatever the concat and the
-   * mp3 encode contributed. Those two are compared separately in the CLI, where
-   * a mismatch is a bug in the join rather than a fact about Hindi.
-   */
+  const utterances: SynthesizedUtterance[] = planned.map((utterance, i) => {
+    const firstTake = first[i] as Take;
+    const keptTake = kept[i] as Take;
+    const retake = secondByIndex.get(i);
+    return {
+      index: utterance.index,
+      segmentIds: utterance.segments.map((segment) => segment.id),
+      sourceStartSec: utterance.sourceStartSec,
+      deadlineSec: finalSlots[i]?.deadlineSec ?? sourceDurationSec,
+      markupUsed: utterance.text,
+      inputMode: "text",
+      requestedRate: utterance.requestedRate,
+      speakingRate: keptTake.speakingRate,
+      naturalDurationSec: firstTake.durationSec,
+      measuredDurationSec: keptTake.durationSec,
+      refit: keptTake !== firstTake,
+      pauseBeforeMs: utterance.pauseBeforeMs,
+      outputStartSec: placed.startSec[i] ?? 0,
+      billedChars: firstTake.billedChars + (retake?.billedChars ?? 0),
+      latencyMs: firstTake.latencyMs + (retake?.latencyMs ?? 0),
+    };
+  });
+
+  const segments: SynthesizedSegment[] = planned.flatMap((utterance, i) =>
+    utterance.segments.map((adapted) => {
+      const source = sourceById.get(adapted.id) as AnalyzedSegment;
+      const present = adapted.emphasisTerms.filter(
+        (term) => term.trim() !== "" && adapted.targetText.includes(term)
+      );
+      return {
+        id: adapted.id,
+        startSec: source.startSec,
+        endSec: source.endSec,
+        voice,
+        speakingRate: (utterances[i] as SynthesizedUtterance).speakingRate,
+        markupUsed: utterance.text,
+        inputMode: "text" as const,
+        utterance: i,
+        // Only the utterance's first segment can carry a pause: groupIntoUtterances
+        // starts a new utterance at every segment that asks for one.
+        pauseBeforeMs: PAUSE_MS[adapted.ttsHints.pauseBefore],
+        emphasisNotFound: adapted.emphasisTerms.filter(
+          (term) => !adapted.targetText.includes(term)
+        ),
+        // No inline pause any more: it restarted the voice (see the header).
+        emphasisPausedTerm: null,
+        emphasisNotRealized: present,
+      };
+    })
+  );
+
   const spokenChars = adaptation.segments.reduce(
     (total, segment) => total + countSpokenChars(segment.targetText),
     0
   );
-  const spokenSec = segments.reduce(
-    (total, segment) => total + segment.measuredDurationSec,
+  const spokenSec = utterances.reduce(
+    (total, utterance) => total + utterance.measuredDurationSec,
     0
   );
 
@@ -378,11 +520,13 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
     durationSec,
     voice,
     segments,
-    billedChars: segments.reduce((total, segment) => total + segment.billedChars, 0),
+    utterances,
+    sourceDurationSec,
+    billedChars: utterances.reduce((total, utterance) => total + utterance.billedChars, 0),
     measuredCharsPerSec: spokenChars / spokenSec,
   });
 
-  return { synthesis, segmentFiles };
+  return { synthesis, utteranceFiles: kept.map((entry) => entry.file) };
 }
 
 /**

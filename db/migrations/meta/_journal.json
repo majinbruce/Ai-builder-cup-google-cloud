@@ -15,6 +15,13 @@
       "when": 1789075327855,
       "tag": "0001_gray_molten_man",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790882086656,
+      "tag": "0002_careful_piledriver",
+      "breakpoints": true
     }
   ]
 }

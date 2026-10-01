@@ -206,6 +206,10 @@ export const localizeJobs = pgTable(
     status: text("status", { enum: LOCALIZE_JOB_STATUSES }).notNull().default("queued"),
     targetLanguage: text("target_language").notNull(),
     sourceUri: text("source_uri"),
+    /** The uploaded footage, kept only when the upload had playable video. */
+    sourceVideoUri: text("source_video_uri"),
+    /** That footage with the Hindi audio under it, once synthesis is done. */
+    outputVideoUri: text("output_video_uri"),
     error: text("error"),
     analysis: jsonb("analysis"),
     /** Stage 1's emphasis claims scored against ffmpeg — ours, never the model's. */

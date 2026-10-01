@@ -226,7 +226,7 @@ if (noAudio) {
   out("  [4/4] synth    SKIPPED (--no-audio)");
 } else {
   out();
-  out("  [4/4] synth    Chirp 3 HD, one call per segment, then ffmpeg concat...");
+  out("  [4/4] synth    Chirp 3 HD, one call per sentence group, fitted to the source timeline...");
 
   if ((await ffmpegAvailable()) === null) {
     fail("ffmpeg is not on PATH, so stage 4 cannot concatenate. sudo apt install ffmpeg");
@@ -242,13 +242,13 @@ if (noAudio) {
     analysis,
     adaptation,
     outDir: "outputs",
-    onSegment: (segment, index, total) => {
-      process.stdout.write(`\r        ${index + 1}/${total} ${segment.id}          `);
+    onProgress: (done, total) => {
+      process.stdout.write(`\r        ${done}/${total}          `);
     },
   });
 
   synthesis = result.synthesis;
-  out(`\r        ${synthesis.segments.length} segments synthesized      `);
+  out(`\r        ${synthesis.utterances?.length ?? 0} utterances synthesized      `);
   out(`        ${synthesis.durationSec.toFixed(1)}s of Hindi audio, ${synthesis.billedChars} billed chars`);
 }
 

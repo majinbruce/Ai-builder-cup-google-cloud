@@ -200,7 +200,13 @@ const envSchema = z.object({
   // full-SSML fallback if the Phase 3 spike shows prosody markup is ignored.
   TTS_VOICE: z.string().min(1).default("hi-IN-Chirp3-HD-Kore"),
 
-  MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(26_214_400),
+  /**
+   * 100 MiB: a two-minute 1080p lecture is typically 30-60 MB. Uploads go
+   * browser -> GCS on a signed URL, so Cloud Run's 32 MiB HTTP/1 request cap
+   * (docs/research.md) does not apply to them; the multipart route still hits
+   * it in production and is kept for scripts and tests.
+   */
+  MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(104_857_600),
 
   /**
    * Capped at 180 rather than merely defaulted to it. Gemini bills 32 audio

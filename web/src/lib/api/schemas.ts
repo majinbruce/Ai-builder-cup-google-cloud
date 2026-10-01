@@ -238,9 +238,12 @@ export const synthesizedSegmentSchema = z.object({
   speakingRate: z.number(),
   markupUsed: z.string(),
   inputMode: z.enum(["text", "markup", "ssml"]),
-  measuredDurationSec: z.number(),
-  billedChars: z.number().int(),
-  latencyMs: z.number().int(),
+  /** Absent when the segment was voiced inside a longer utterance (2026-10-01 on). */
+  measuredDurationSec: z.number().optional(),
+  billedChars: z.number().int().optional(),
+  latencyMs: z.number().int().optional(),
+  /** Index into `utterances`: the TTS call this segment was spoken in. */
+  utterance: z.number().int().optional(),
   emphasisNotFound: z.array(z.string()),
   emphasisPausedTerm: z.string().nullable(),
   pauseBeforeMs: z.number().int(),
@@ -248,15 +251,50 @@ export const synthesizedSegmentSchema = z.object({
 });
 export type SynthesizedSegment = z.infer<typeof synthesizedSegmentSchema>;
 
+/**
+ * One Cloud TTS call: consecutive segments spoken in one breath, placed on the
+ * source timeline. Jobs from before 2026-10-01 have none.
+ */
+export const synthesizedUtteranceSchema = z.object({
+  index: z.number().int(),
+  segmentIds: z.array(z.string()),
+  sourceStartSec: z.number(),
+  deadlineSec: z.number(),
+  markupUsed: z.string(),
+  inputMode: z.enum(["text", "markup", "ssml"]),
+  requestedRate: z.number(),
+  speakingRate: z.number(),
+  naturalDurationSec: z.number(),
+  measuredDurationSec: z.number(),
+  refit: z.boolean(),
+  pauseBeforeMs: z.number().int(),
+  outputStartSec: z.number(),
+  billedChars: z.number().int(),
+  latencyMs: z.number().int(),
+});
+export type SynthesizedUtterance = z.infer<typeof synthesizedUtteranceSchema>;
+
 export const synthesisSchema = z.object({
   audioUri: z.string(),
   durationSec: z.number(),
   voice: z.string(),
   segments: z.array(synthesizedSegmentSchema),
+  utterances: z.array(synthesizedUtteranceSchema).optional(),
+  sourceDurationSec: z.number().optional(),
   billedChars: z.number().int(),
   measuredCharsPerSec: z.number(),
 });
 export type Synthesis = z.infer<typeof synthesisSchema>;
+
+/** Mirrors the API's `UploadTarget`: where and how to PUT the file. */
+export const uploadTargetSchema = z.object({
+  uploadId: z.uuid(),
+  url: z.string(),
+  method: z.literal("PUT"),
+  headers: z.record(z.string(), z.string()),
+  expiresAt: z.iso.datetime(),
+});
+export type UploadTarget = z.infer<typeof uploadTargetSchema>;
 
 export const jobStatusSchema = z.enum([
   "queued",
@@ -276,6 +314,13 @@ export const jobSchema = z.object({
   status: jobStatusSchema,
   targetLanguage: z.string(),
   sourceUri: z.string().nullable(),
+  /**
+   * Set when the upload had playable footage. Defaulted rather than required so
+   * a page served by a newer web build against an older API still parses.
+   */
+  sourceVideoUri: z.string().nullable().default(null),
+  /** The footage with the Hindi under it; null until done, or if the mux failed. */
+  outputVideoUri: z.string().nullable().default(null),
   error: z.string().nullable(),
   analysis: analysisSchema.nullable(),
   corroboration: corroborationSchema.nullable(),

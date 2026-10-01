@@ -70,8 +70,17 @@ export const JobStatus = z.enum([
 
 ### Stage 0 — Ingest
 
-Input: multipart upload (`audio/*`, `video/mp4`, ≤ 25 MB, ≤ 180 s) or, NICE, a
-YouTube URL. The size cap is `@fastify/multipart`'s `limits.fileSize`, fed from
+Input: `audio/*` or `video/mp4`, ≤ 100 MiB, ≤ 180 s, or, NICE, a YouTube URL.
+**Amended 2026-10-01:** the browser uploads straight to GCS — `POST /uploads`
+returns a V4 signed PUT URL (15 min, `x-goog-content-length-range` in the
+signature), then `POST /jobs/from-upload {uploadId}` ingests it — because Cloud
+Run caps HTTP/1 request bodies at 32 MiB and a 2-minute 1080p mp4 is 30–60 MB
+(`docs/research.md` § Cloud Run). The multipart route below remains for scripts
+and tests and keeps that 32 MiB ceiling in production. An mp4 with a playable
+video track keeps its footage as `jobs/<id>/source.mp4`; after stage 4 the
+picture is copied (not re-encoded) under the Hindi audio as `output.mp4`, and
+the job page plays both side by side. A mux failure leaves an audio-only result
+rather than failing the job. The size cap is `@fastify/multipart`'s `limits.fileSize`, fed from
 `config.limits.maxUploadBytes` — **not** Fastify's `bodyLimit`, which measurement
 on 2026-09-07 showed does not apply to multipart at all (a 300 KB file passed a
 1 KB `bodyLimit` with a 200, because the plugin consumes the raw stream itself).
@@ -254,26 +263,28 @@ export const Critique = z.object({
 
 ### Stage 4 — Synthesize (Cloud Text-to-Speech, Chirp 3 HD, `hi-IN`)
 
-Per segment, one `synthesizeSpeech` call. **The conditional in this section is
-now resolved by measurement (2026-09-08) and resolved to the fallback** — see
-`docs/research.md` § Phase 3 spike for the table.
+**Reworked 2026-10-01** after listening to the deployed demo — see
+`docs/research.md` § Synthesis rework. The unit of speech is an **utterance**,
+not a segment:
 
-- `speaking_rate = ttsHints.speakingRate` on `audioConfig`. Confirmed: rate 0.85
-  lengthens the audio 17.2%.
-- `pauseBefore` becomes SSML `<break time="350ms|700ms"/>` at the start of the
-  utterance. Confirmed accurate (+0.30 s measured for 0.35 s requested). **Not**
-  `[pause short|long]` markup, which the docs list for `hi-IN` and which the
-  spike measured producing no silence at all in the leading position.
-- Emphasis is **not** realized with SSML `<prosody>`/`<emphasis>`. Chirp 3 HD
-  accepts them and ignores their rate attribute: `<prosody rate="1.0">`, a
-  semantic no-op, changed the duration as much as `rate="slow"`, and each inline
-  tag inserts ~1.4 s of dead time at its own position. A build that wrapped every
-  stressed term made the fixture 41% longer while stressing nothing.
-- What emphasis IS: a `<break time="150ms"/>` before **one** term per segment —
-  the pause a teacher puts in front of a word they want to land. It is named
-  `emphasisPausedTerm` in the schema because it is a pause and not stress.
-  Per-term stress is not achievable on this voice, and the artifact says so per
-  segment via `emphasisNotRealized`.
+- Consecutive segments are grouped until one ends a sentence (`। ? ! .`); a
+  segment with `pauseBefore` ≠ none, or the 5,000-byte input cap, starts a new
+  one. One `synthesizeSpeech` call per utterance, **plain text, no tags**: Chirp
+  3 HD speaks each request as a complete utterance, so a mid-sentence boundary or
+  an inline `<break>` gives a sentence-final ending and a restart.
+- `speaking_rate` = the adapter's `ttsHints.speakingRate`s weighted by source
+  span. Confirmed: rate 0.85 lengthens the audio 17.2%.
+- `pauseBefore` becomes 350 / 700 ms of **silence written between calls**, exact.
+- **Timeline fit**: each utterance starts at its source start (never earlier),
+  after the previous one plus its pause. One that would miss the next
+  utterance's start is re-taken once at a faster rate (≤ ×1.15 of requested,
+  ≤ 1.3); the faster take is kept only if it is shorter. The output is padded to
+  the source's length, so the Hindi is as long as the English and in step with
+  the video.
+- Emphasis is **not** realized acoustically. Chirp 3 HD ignores `<prosody>`'s
+  rate (Phase 3), and the one device that survived, an inline `<break>` before a
+  term, turned out to restart the voice. Emphasis terms are highlighted in the
+  reasoning panel and listed under `emphasisNotRealized`.
 
 Audio comes back as LINEAR16, not MP3: per-segment MP3s inherit encoder padding
 at every concat boundary, which would corrupt the duration measurements this
@@ -304,11 +315,20 @@ export const SynthesizedSegment = z.object({
   emphasisNotRealized: z.array(z.string()),    // shown in the UI, silent in the audio
   emphasisNotFound: z.array(z.string()),       // claimed but absent from its own Hindi
 });
+// Added 2026-10-01; per-segment measuredDurationSec/billedChars/latencyMs became
+// optional (they live here now), and old jobs without utterances still parse.
+export const SynthesizedUtterance = z.object({
+  index, segmentIds, sourceStartSec, deadlineSec, markupUsed, inputMode,
+  requestedRate, speakingRate, naturalDurationSec, measuredDurationSec,
+  refit, pauseBeforeMs, outputStartSec, billedChars, latencyMs,
+});
 export const Synthesis = z.object({
   audioUri: z.string(),
   durationSec: z.number().positive(),
   voice: z.string(),
   segments: z.array(SynthesizedSegment),
+  utterances: z.array(SynthesizedUtterance).optional(),
+  sourceDurationSec: z.number().positive().optional(),
   billedChars: z.number().int().nonnegative(),
   measuredCharsPerSec: z.number().positive(),
 });
@@ -571,7 +591,7 @@ Cloud Run job against the same image and env.
 | Structured output rejects a "deeply nested" schema | 400 on `response_format` | Schemas are two levels deep by design; split Adapt into two calls if needed. |
 | No native Hindi judge on the team | — | Critique back-translation and fidelity are shown in the UI as the quality evidence; ask a Hindi-speaking colleague to review the fixture output once before recording. |
 | Postgres hosting undecided until credits confirmed | — | Three-way fallback in Phase 5; all three use the same `PG_*` env vars, so the app does not change. |
-| Judge uploads something huge or non-speech | 413 / garbage analysis | Hard caps 25 MB / 180 s at the route; ffmpeg probe rejects silent files; per-user 5 jobs per hour rate limit. |
+| Judge uploads something huge or non-speech | 413 / garbage analysis | Hard caps 100 MiB (in the signed URL) / 180 s; ffmpeg probe rejects silent files; per-user 5 jobs per hour rate limit. |
 | Gemini model or API surface renamed mid-hackathon | SDK error | Model id and API version are single constants in `src/lib/gemini.ts`; `research.md` records the verified names and date. |
 
 ---

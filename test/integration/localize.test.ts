@@ -177,7 +177,7 @@ const stages: Stages = {
       billedChars: 10 * analysis.segments.length,
       measuredCharsPerSec: 12,
     });
-    return { synthesis, segmentFiles: [] };
+    return { synthesis, utteranceFiles: [] };
   },
 };
 
@@ -438,6 +438,16 @@ describe("localize job lifecycle", () => {
     expect(Date.parse(body.data[0]?.createdAt ?? "")).toBeGreaterThanOrEqual(
       Date.parse(body.data[1]?.createdAt ?? "")
     );
+
+    // Past the last page: no rows, but the total is still the real one.
+    const beyond = await app.inject({
+      method: "GET",
+      url: "/api/v1/localize/jobs?limit=2&page=5",
+      headers: { cookie: owner.cookie },
+    });
+    const beyondBody = beyond.json<{ data: unknown[]; meta: { total: number } }>();
+    expect(beyondBody.data).toEqual([]);
+    expect(beyondBody.meta.total).toBe(2);
   });
 
   it("rejects a non-UUID job id with a 400", async () => {
@@ -689,5 +699,264 @@ describe("localize job lifecycle", () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json<{ data: { topic: string | null }[] }>().data[0]?.topic).toBeNull();
+  });
+});
+
+/**
+ * Direct uploads and video (2026-10-01). Its own app, and so its own in-memory
+ * rate limiter: the lifecycle suite above spends nearly the whole per-IP
+ * sign-up allowance, and these tests need two more accounts.
+ */
+describe("direct uploads and video", () => {
+  let app: App;
+  let mailer: FakeMailer;
+  let tmpDir: string;
+  const createdJobIds: string[] = [];
+  const fixtureBytes = fs.readFileSync(FIXTURE);
+
+  beforeAll(async () => {
+    mailer = createFakeMailer();
+    app = await buildTestApp(mailer, { localizeStages: stages });
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "localize-direct-"));
+  });
+
+  afterAll(async () => {
+    await app.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const id of createdJobIds) {
+      fs.rmSync(path.resolve("outputs", "storage", "jobs", id), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  const newUser = () => registerAndSignIn(app, mailer);
+
+  const settle = async (who: TestIdentity, id: string) => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/v1/localize/jobs/${id}`,
+        headers: { cookie: who.cookie },
+      });
+      const parsed = Job.parse(res.json<{ data: unknown }>().data);
+      if (parsed.status === "done" || parsed.status === "failed") return { job: parsed };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`job ${id} never settled`);
+  };
+
+  /**
+   * The three-call flow the web uses, against the local backend: .env.test has
+   * no GCS_BUCKET, so POST /uploads hands back the API's own PUT route instead
+   * of a signed GCS URL. Everything after the PUT is the same code either way.
+   */
+  const directUpload = async (who: TestIdentity, bytes: Buffer, contentType: string) => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/localize/uploads",
+      headers: { cookie: who.cookie },
+      payload: { contentType, sizeBytes: bytes.length },
+    });
+    expect(created.statusCode).toBe(201);
+    const target = created.json<{
+      data: { uploadId: string; url: string; headers: Record<string, string> };
+    }>().data;
+
+    const put = await app.inject({
+      method: "PUT",
+      url: target.url,
+      headers: { cookie: who.cookie, ...target.headers },
+      payload: bytes,
+    });
+    expect(put.statusCode).toBe(200);
+
+    const job = await app.inject({
+      method: "POST",
+      url: "/api/v1/localize/jobs/from-upload",
+      headers: { cookie: who.cookie },
+      payload: { uploadId: target.uploadId },
+    });
+    if (job.statusCode === 202) createdJobIds.push(job.json<{ data: Job }>().data.id);
+    return { target, job };
+  };
+
+  const uploadPathFor = (who: TestIdentity, uploadId: string) =>
+    path.resolve("outputs", "storage", "uploads", who.userId, uploadId);
+
+  /**
+   * One account for every direct-upload test: the sign-up limiter is per IP and
+   * this file is already near it. Two jobs between them, under the budget.
+   */
+  let directUser: TestIdentity | null = null;
+  const directOwner = async () => (directUser ??= await newUser());
+
+  it("runs a direct upload to done and deletes the upload object", async () => {
+    const owner = await directOwner();
+    behaviour.throwIn = null;
+    behaviour.failIds = [];
+
+    const { target, job } = await directUpload(owner, fixtureBytes, "audio/mpeg");
+
+    expect(target.url).toBe(`/api/v1/localize/uploads/${target.uploadId}`);
+    expect(job.statusCode).toBe(202);
+    const queued = Job.parse(job.json<{ data: unknown }>().data);
+    // An audio upload makes an audio-only job.
+    expect(queued.sourceVideoUri).toBeNull();
+    expect(fs.existsSync(uploadPathFor(owner, target.uploadId))).toBe(false);
+
+    const { job: done } = await settle(owner, queued.id);
+    expect(done.status).toBe("done");
+    expect(done.outputVideoUri).toBeNull();
+
+    const video = await app.inject({
+      method: "GET",
+      url: `/api/v1/localize/jobs/${queued.id}/video/source`,
+      headers: { cookie: owner.cookie },
+    });
+    expect(video.statusCode).toBe(404);
+  });
+
+  it("refuses a declared size over the cap before anything is uploaded", async () => {
+    const owner = await directOwner();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/localize/uploads",
+      headers: { cookie: owner.cookie },
+      payload: { contentType: "video/mp4", sizeBytes: 200 * 1024 * 1024 },
+    });
+    expect(res.statusCode).toBe(413);
+  });
+
+  it("refuses an undeclarable type and unknown keys", async () => {
+    const owner = await directOwner();
+    const wrongType = await app.inject({
+      method: "POST",
+      url: "/api/v1/localize/uploads",
+      headers: { cookie: owner.cookie },
+      payload: { contentType: "video/quicktime", sizeBytes: 1000 },
+    });
+    expect(wrongType.statusCode).toBe(400);
+
+    const extraKey = await app.inject({
+      method: "POST",
+      url: "/api/v1/localize/uploads",
+      headers: { cookie: owner.cookie },
+      payload: { contentType: "audio/mpeg", sizeBytes: 1000, key: "uploads/x" },
+    });
+    expect(extraKey.statusCode).toBe(400);
+  });
+
+  it("refuses a local PUT body over the cap, whatever size was declared", async () => {
+    const owner = await directOwner();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/localize/uploads",
+      headers: { cookie: owner.cookie },
+      payload: { contentType: "audio/mpeg", sizeBytes: 1000 },
+    });
+    const target = created.json<{ data: { uploadId: string; url: string } }>().data;
+
+    const put = await app.inject({
+      method: "PUT",
+      url: target.url,
+      headers: { cookie: owner.cookie, "content-type": "audio/mpeg" },
+      payload: Buffer.alloc(26 * 1024 * 1024 + 1),
+    });
+    expect(put.statusCode).toBe(413);
+    expect(fs.existsSync(uploadPathFor(owner, target.uploadId))).toBe(false);
+  });
+
+  it("cannot turn somebody else's upload into a job", async () => {
+    const owner = await directOwner();
+    const outsider = await newUser();
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/localize/uploads",
+      headers: { cookie: owner.cookie },
+      payload: { contentType: "audio/mpeg", sizeBytes: fixtureBytes.length },
+    });
+    const target = created.json<{ data: { uploadId: string; url: string } }>().data;
+    await app.inject({
+      method: "PUT",
+      url: target.url,
+      headers: { cookie: owner.cookie, "content-type": "audio/mpeg" },
+      payload: fixtureBytes,
+    });
+
+    const stolen = await app.inject({
+      method: "POST",
+      url: "/api/v1/localize/jobs/from-upload",
+      headers: { cookie: outsider.cookie },
+      payload: { uploadId: target.uploadId },
+    });
+    expect(stolen.statusCode).toBe(404);
+    // The owner's object is untouched by the outsider's attempt.
+    expect(fs.existsSync(uploadPathFor(owner, target.uploadId))).toBe(true);
+    fs.rmSync(uploadPathFor(owner, target.uploadId), { force: true });
+  });
+
+  it("keeps an mp4's footage and puts the Hindi under it", async () => {
+    const owner = await directOwner();
+    behaviour.throwIn = null;
+    behaviour.failIds = [];
+
+    // Three seconds of test pattern over the fixture's audio: a real h264 mp4.
+    const clip = path.join(tmpDir, "clip.mp4");
+    await run("ffmpeg", [
+      "-hide_banner",
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc=duration=3:size=160x120:rate=10",
+      "-i",
+      FIXTURE,
+      "-t",
+      "3",
+      "-map",
+      "0:v",
+      "-map",
+      "1:a",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      clip,
+    ]);
+
+    const { job } = await directUpload(owner, fs.readFileSync(clip), "video/mp4");
+    expect(job.statusCode).toBe(202);
+    const queued = Job.parse(job.json<{ data: unknown }>().data);
+    expect(queued.sourceVideoUri).not.toBeNull();
+
+    const { job: done } = await settle(owner, queued.id);
+    expect(done.status).toBe("done");
+    expect(done.outputVideoUri).not.toBeNull();
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/localize/jobs/${queued.id}/video/output`,
+      headers: { cookie: owner.cookie, range: "bytes=0-99" },
+    });
+    expect(res.statusCode).toBe(206);
+    expect(res.headers["content-type"]).toBe("video/mp4");
+
+    // The stored output carries the source's picture and the synthesized audio.
+    const { stdout } = await run("ffprobe", [
+      "-v",
+      "error",
+      "-show_entries",
+      "stream=codec_type,codec_name",
+      "-of",
+      "csv=p=0",
+      done.outputVideoUri as string,
+    ]);
+    expect(stdout).toContain("h264,video");
+    expect(stdout).toContain("aac,audio");
   });
 });

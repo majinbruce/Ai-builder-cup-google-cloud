@@ -2,7 +2,7 @@ import process from "node:process";
 import { ffmpegAvailable } from "../lib/ffmpeg.ts";
 import { TTS_VOICE, listVoices } from "../lib/tts.ts";
 import {
-  buildTtsInput,
+  groupIntoUtterances,
   measurePlainBaseline,
   runSynthesize,
   type BaselineReport,
@@ -28,7 +28,7 @@ import {
  *   npm run stage:synthesize -- --baseline         # also measure the no-prosody control
  *
  * Reads outputs/analysis.json and outputs/adaptation.json. Writes
- * outputs/output.mp3, outputs/segments/*.wav and outputs/synthesis.json.
+ * outputs/output.mp3, outputs/utterances/*.wav and outputs/synthesis.json.
  *
  * The dry run is the same idea as stage-critique.ts's: this stage's claim is that
  * the audit panel shows the exact request that produced each segment's audio, and
@@ -72,33 +72,28 @@ out(`  segments  ${adaptation.segments.length}`);
 out();
 
 if (dryRun) {
-  out("  --- every request this stage would send ---");
+  out("  --- every request this stage would send (first takes) ---");
   out();
 
+  const sourceById = new Map(analysis.segments.map((segment) => [segment.id, segment]));
+  const utterances = groupIntoUtterances(adaptation.segments, sourceById);
   let billable = 0;
 
-  for (const segment of adaptation.segments) {
-    const built = buildTtsInput(segment);
-    billable += built.input.content.length;
-
-    out(`  ${segment.id}  rate ${built.speakingRate.toFixed(2)}  mode ${built.input.mode}`);
-    out(`      ${built.input.content}`);
-    if (built.emphasisNotFound.length > 0) {
-      out(
-        `      NOT APPLIED: ${built.emphasisNotFound.map((term) => `"${term}"`).join(", ")}`
-      );
-    }
+  for (const utterance of utterances) {
+    billable += utterance.text.length;
+    out(
+      `  #${utterance.index}  ${utterance.segments.map((segment) => segment.id).join("+")}  ` +
+        `rate ${utterance.requestedRate.toFixed(2)}  pause ${utterance.pauseBeforeMs} ms  ` +
+        `at ${utterance.sourceStartSec.toFixed(1)}s`
+    );
+    out(`      ${utterance.text}`);
     out();
   }
 
-  out(`  ${billable} characters would be billed across ${adaptation.segments.length} requests.`);
-  out();
-  out("  The <prosody rate> wrappers realize the emphasis stage 2 detected, and the");
-  out("  <break time> leads realize its pauseBefore. Both were confirmed on this voice");
-  out("  by src/scripts/spike-tts.ts, which predicted a 3s break and measured +3.59s.");
-  out("  <emphasis> is deliberately absent: the spike could not distinguish its effect");
-  out("  from noise, and a tag we cannot show doing anything should not appear in a");
-  out("  panel that claims to show what was applied.");
+  out(
+    `  ${billable} characters would be billed across ${utterances.length} requests, ` +
+      `plus one faster re-take for any utterance that misses its deadline.`
+  );
   out();
   out("  --dry-run: no request made.");
   out();
@@ -130,13 +125,13 @@ const { synthesis } = await runSynthesize({
   adaptation,
   outDir: "outputs",
   voice,
-  onSegment: (segment, index, total) => {
-    process.stdout.write(`\r  synthesizing ${index + 1}/${total} ${segment.id}      `);
+  onProgress: (done, total) => {
+    process.stdout.write(`\r  synthesizing ${done}/${total}      `);
   },
 });
 
 const wallClockSec = (performance.now() - startedAt) / 1000;
-out(`\r  ${synthesis.segments.length} segments synthesized in ${wallClockSec.toFixed(1)}s      `);
+out(`\r  ${synthesis.utterances?.length ?? 0} utterances synthesized in ${wallClockSec.toFixed(1)}s      `);
 out();
 
 printSynthesis(synthesis);
@@ -152,8 +147,8 @@ if (measureBaseline) {
     process.stdout.write(`\r  measuring ${index + 1}/${total} ${id}      `);
   });
 
-  const withProsodySec = synthesis.segments.reduce(
-    (total, segment) => total + segment.measuredDurationSec,
+  const withProsodySec = (synthesis.utterances ?? []).reduce(
+    (total, utterance) => total + utterance.measuredDurationSec,
     0
   );
   const premium = (withProsodySec - baseline.plainSec) / baseline.plainSec;
@@ -194,5 +189,5 @@ const synthesisPath = writeStageOutput("synthesis.json", {
 
 out(`  written -> ${synthesisPath}`);
 out(`  written -> ${synthesis.audioUri}  <- play this`);
-out(`  written -> outputs/segments/*.wav  (one per segment, for the UI's play button)`);
+out(`  written -> outputs/utterances/*.wav  (one per TTS call, both takes when refit)`);
 out();

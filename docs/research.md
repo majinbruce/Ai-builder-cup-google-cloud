@@ -60,6 +60,18 @@ const parsed = zodSchema.parse(JSON.parse(interaction.output_text));
   2026-09-07 against the full `Analysis` shape from SPEC §b plus a deliberately
   reused sub-object: Zod 4 **inlines** repeated schemas rather than emitting
   `$defs`, so the SPEC schemas convert cleanly. Re-check if Zod is upgraded.
+- **Retries and timeout — read from the SDK source 2026-09-23, then measured.**
+  `interactions.create` already retries on its own: `attempt-count-backoff`, 4
+  retries, 500 ms initial / 8 s max interval, on `408/409/429/5XX` and on
+  connection errors (`dist/node/index.mjs`, `$do$g`). So SPEC §f's SHOULD item
+  "retry with backoff on 429" is covered by the SDK and was not re-implemented.
+  What it does NOT have is a timeout: the default is `timeout_ms: -1`. Passing
+  `{ timeout: ms }` as the second argument works and applies **per attempt** —
+  measured with `timeout: 1`: `APIConnectionTimeoutError` after 6.7 s total,
+  i.e. the four backoff retries ran. `src/lib/gemini.ts` sets 150 s per attempt
+  (`CALL_TIMEOUT_MS`), so a hung call fails its job in at most ~13 min instead
+  of holding it in flight forever (the orphan reaper skips this process's own
+  running jobs by design, so nothing else would ever fail it).
 
 ## ffmpeg acoustic measurement (Phase 1, measured on this machine)
 
@@ -94,7 +106,7 @@ two reporting bugs the first live run exposed that no synthetic test could.
 |---|---|---|
 | Voice family | Chirp 3 HD, GA. Name pattern `<locale>-Chirp3-HD-<Voice>`, e.g. `hi-IN-Chirp3-HD-Kore`. 30 voice names (Aoede, Charon, Kore, Puck, Zephyr, …). `hi-IN` supported. | https://docs.cloud.google.com/text-to-speech/docs/chirp3-hd |
 | Pace | `speaking_rate` 0.25–2.0. | same |
-| Pauses — **DOC IS WRONG for the leading position** | Docs: `markup` input with `[pause short]`, `[pause long]`, `[pause]`; "available for `hi-IN`". **Measured 2026-09-08 (Phase 3 spike): `[pause short]` at the START of an utterance produces NO measurable silence — −2.8%, inside the noise floor.** Inline it does something (+0.63 s in a probe). Use SSML `<break time>` instead, which is accurate in both positions. | https://docs.cloud.google.com/text-to-speech/docs/chirp3-hd |
+| Pauses — **DOC IS WRONG for the leading position** | Docs: `markup` input with `[pause short]`, `[pause long]`, `[pause]`; "available for `hi-IN`". **Measured 2026-09-08 (Phase 3 spike): `[pause short]` at the START of an utterance produces NO measurable silence — −2.8%, inside the noise floor.** Inline it does something (+0.63 s in a probe). Use SSML `<break time>` instead, which is accurate in the leading position. **Corrected 2026-10-01: an INLINE `<break>` is not accurate and not harmless** — see § Synthesis rework. | https://docs.cloud.google.com/text-to-speech/docs/chirp3-hd |
 | Custom pronunciation | IPA / X-SAMPA via `custom_pronunciations`; available for `hi-IN`. | same |
 | **SSML — RESOLVED 2026-09-08, and no page was right** | The three conflicting claims were: release note 2025-10-17 (only `<phoneme>`, `<p>`, `<s>`, `<sub>`, `<say-as>`), the Chirp 3 HD page (also `<prosody>`, `<break>`, `<voice>`, `<audio>`), and the voice-list page ("doesn't support SSML input"). **The measured answer: Chirp 3 HD on `hi-IN` ACCEPTS ssml input and parses its STRUCTURE, honours `<break time>` accurately, and IGNORES inline `<prosody>`'s rate attribute — inserting ~1.4 s of dead time per inline tag instead.** So the voice-list page is wrong (ssml is accepted), the Chirp 3 HD page is misleading (`<prosody>` is accepted and does not do what it says), and the release note is closest but still incomplete (`<break>` works and is not on its list). Full table below. | measured; see § Phase 3 spike |
 | Full-SSML fallback | Neural2 / WaveNet voices support `<prosody rate|pitch|volume>`, `<emphasis level>`, `<break>`. Hindi Neural2 voices exist under `hi-IN`. | https://docs.cloud.google.com/text-to-speech/docs/ssml |
@@ -206,6 +218,19 @@ Real runs on the 8-segment fixture adaptation, `hi-IN-Chirp3-HD-Kore`.
 | **Length drift — SPEC §g risk now MEASURED, not estimated** | Source span 62.6 s. The adapted Hindi as plain text at rate 1.0: **63.4 s, +1.2%** — so the character budget in `adapt.v1.md` works and the risk row's assumed 15–25% overrun does not materialise. With stage 4's pedagogical prosody applied: **69.8 s, +11.6%**, i.e. **+10.2% is time this stage adds on purpose** (8 emphasis pauses + 2 lead pauses ≈ 6.4 s, which closes the arithmetic). Measured with `--baseline`, which synthesizes every segment a second time as plain text purely to separate the two causes |
 | Why the decomposition is not optional | "Our output is 41% too long" and "our output is 11% too long, of which 10 points are pauses we chose to insert" are different claims and only one is honest. The `--baseline` control exists so the stage cannot take credit for the adapter's budget or blame the adapter for its own pauses |
 
+## Synthesis rework — measured 2026-10-01, from listening to the deployed demo
+
+The demo's Hindi ran **70.1 s for a 63.1 s source**, segment ends sounded final
+("dry"), and the voice audibly broke and restarted mid-segment. Measured on the
+deployed demo job (`b176f8b2…`) and by re-synthesizing its exact Hindi:
+
+| Item | Measured | Consequence |
+|---|---|---|
+| **Inline `<break time="150ms"/>` on Chirp 3 HD `hi-IN`** | `silencedetect` on the demo output: **0.78 s** and **1.07 s** holes where 150 ms was requested, at `…करने का ‖ सबसे तेज़…` and `हाँ, वो ‖ सबसे छोटा…`. Re-synthesizing s01 without it (2 takes each): 11.91/12.27 s → 11.64/11.76 s, and the 0.64 s hole is **gone**. The voice ends the text before the tag with a sentence-final contour and restarts after it | Phase 3 read "+0.59 s over the request" as an accurate-enough emphasis pause. It is a generation restart. **No inline tags at all** — every pause is now silence written by ffmpeg between calls |
+| **A segment boundary mid-sentence** | Each request is spoken as a complete utterance: s02 ended `…एक्सेलरेट करती है,` and got a full stop's falling ending before s03 restarted. s01+s02 as one call: **19.36/19.44 s vs 20.94 s** as two | Segments are grouped into **utterances** that end at `। ? ! .` (or at a requested pause, or the 5,000-byte input cap) |
+| `speaking_rate` as a fit lever | Duration scales ~linearly (0.85 → +17.2%, vs 1/0.85 = +17.6%); take-to-take noise ±3% | An utterance that would run into the next one's source start is re-taken once at a faster rate, capped at ×1.15 of the adapter's rate |
+| **Result on the same Hindi** | **63.18 s for a 63.11 s source** (was 70.1 s). 6 utterances for 7 segments, 4 re-taken at 1.03–1.15. Silences ≥ 0.5 s: 15 → 6, all at sentence ends or requested pauses. Stage wall clock 8.8 s | Output now matches the source length and each utterance starts no earlier than the English it replaces, so the Hindi tracks the video |
+
 ## Phase 4 — the pipeline behind the API, measured 2026-09-10
 
 `npm run e2e:localize` on `fixtures/sample_60s.mp3`, real Gemini + Chirp 3 HD, through
@@ -244,6 +269,7 @@ Found while building it, recorded because each would otherwise resurface:
 
 - Request timeout default 300 s, max 3600 s. Jobs run async; never block a request on the pipeline. https://docs.cloud.google.com/run/docs/configuring/request-timeout
 - Cannot host Postgres (no persistent disk, scale-to-zero). DB options in priority order: Cloud SQL on credits → user's US VPS with `compose.prod.yml` → Supabase. **Chosen 2026-09-11: Cloud SQL**, `db-f1-micro` (ENTERPRISE edition — Postgres 17 defaults to ENTERPRISE_PLUS, which has no shared-core tier), no authorized networks; Cloud Run reaches it through `--add-cloudsql-instances` at `/cloudsql/<conn>`, and the runtime SA needs `roles/cloudsql.client`. node-postgres appends `.s.PGSQL.5432` to a directory `host` itself. https://docs.cloud.google.com/sql/docs/postgres/connect-run
+- **Request body cap: "Maximum HTTP/1 request size: 32 MiB per request … No limit if using HTTP/2 server."** (verified 2026-10-01). Uploads go browser → web service → API service, both HTTP/1, and Next buffers the body in between, so the 25 MiB `MAX_UPLOAD_BYTES` (a project choice, not a quota) can be raised to at most ~31 MiB on this path. Anything larger (e.g. a 2-min 1080p mp4) needs the browser to upload straight to GCS with a V4 signed URL — **built 2026-10-01**: `getSignedUrl({version: "v4", action: "write", contentType, extensionHeaders: {"x-goog-content-length-range": "0,<max>"}})`. On Cloud Run there is no private key, so the client signs through IAM `signBlob` as the runtime SA, which needs `roles/iam.serviceAccountTokenCreator` **on itself** plus `iamcredentials.googleapis.com` enabled; the bucket needs CORS for the web origin with `PUT` and both signed headers. Measured locally: impersonating the SA from a user ADC fails with `Permission 'iam.serviceAccounts.signBlob' denied` unless the USER also holds Token Creator on the SA, so the signing path is verified on the deployed service, not on a laptop. https://docs.cloud.google.com/run/quotas · https://cloud.google.com/storage/docs/access-control/signing-urls-with-helpers
 
 ### Phase 5 — what the deploy would have got wrong, found before it did (2026-09-11)
 

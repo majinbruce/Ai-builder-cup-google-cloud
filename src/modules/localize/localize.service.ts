@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,19 +7,39 @@ import type { FastifyBaseLogger } from "fastify";
 import { config } from "../../config/index.ts";
 import type { Database } from "../../plugins/db.ts";
 import { AppError, badRequest, notFound } from "../../lib/errors.ts";
-import { encodeMp3, measureMeanVolumeDb, probeDurationSec } from "../../lib/ffmpeg.ts";
-import { downloadFile, jobKey, putFile } from "../../lib/storage.ts";
+import {
+  encodeMp3,
+  measureMeanVolumeDb,
+  muxVideoWithAudio,
+  probeDurationSec,
+  probeHasPlayableVideo,
+} from "../../lib/ffmpeg.ts";
+import {
+  createUploadTarget,
+  deleteFile,
+  downloadFile,
+  fileSize,
+  jobKey,
+  parseStorageUri,
+  putFile,
+  uploadKey,
+  uriForKey,
+} from "../../lib/storage.ts";
 import { runAdapt, runAdaptRetry, runBrief, TARGET_LANGUAGE } from "./adapt.stage.ts";
 import { runAnalyze } from "./analyze.stage.ts";
 import { runCritique, selectForRetry } from "./critique.stage.ts";
 import { runSynthesize } from "./synthesize.stage.ts";
 import * as repo from "./localize.repository.ts";
+import { Transform, type Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type {
   AudioWhich,
+  CreateUploadBody,
   Job,
   JobSummary,
   ListJobsQuery,
   ModelCall,
+  UploadTarget,
 } from "./localize.schemas.ts";
 
 /**
@@ -192,14 +213,30 @@ export async function createJobFromUpload(
     const id = randomUUID();
     const sourceUri = await putFile(normalized, jobKey(id, "source.mp3"));
 
+    /**
+     * The footage is kept as uploaded, so the job page can show the lecture and
+     * stage 4 can put the Hindi under it. Only playable video counts: an mp3's
+     * cover art is a "video stream" to ffprobe and must not make a video job. A
+     * probe failure is not an ingest failure — the audio already decoded — so it
+     * degrades to an audio-only job.
+     */
+    const hasVideo = await probeHasPlayableVideo(uploadPath).catch(() => false);
+    const sourceVideoUri = hasVideo
+      ? await putFile(uploadPath, jobKey(id, "source.mp4"))
+      : undefined;
+
     const row = await repo.insert(ctx.db, {
       id,
       userId,
       targetLanguage: TARGET_LANGUAGE,
       sourceUri,
+      ...(sourceVideoUri === undefined ? {} : { sourceVideoUri }),
     });
 
-    ctx.log.info({ jobId: id, durationSec, meanVolumeDb }, "localize job queued");
+    ctx.log.info(
+      { jobId: id, durationSec, meanVolumeDb, hasVideo },
+      "localize job queued"
+    );
 
     // Deliberately not awaited: the response goes out now and the pipeline runs
     // on. runJob never rejects, so there is no unhandled rejection to catch here.
@@ -211,6 +248,141 @@ export async function createJobFromUpload(
     return { job: repo.toDto(row), finished };
   } finally {
     await fsp.rm(workDir, { recursive: true, force: true });
+  }
+}
+
+const tooLarge = (): AppError => {
+  const mb = Math.floor(config.limits.maxUploadBytes / 1024 / 1024);
+  return new AppError(`The file is larger than ${mb} MB.`, 413, [
+    { field: "file", message: `Files must be ${mb} MB or smaller.` },
+  ]);
+};
+
+/**
+ * Step 1 of a direct upload: refuse early, then say where the bytes go.
+ *
+ * The budget and the declared size are checked HERE, before anything is
+ * uploaded, so a refused user does not push 100 MB first. The declared size is
+ * a claim; GCS enforces the real one through the signed length range, and
+ * createJobFromStoredUpload checks the stored object again.
+ */
+export async function createUpload(
+  ctx: Ctx,
+  userId: string,
+  body: CreateUploadBody
+): Promise<UploadTarget> {
+  await assertJobBudget(ctx, userId);
+  if (body.sizeBytes > config.limits.maxUploadBytes) throw tooLarge();
+
+  const uploadId = randomUUID();
+  const target = await createUploadTarget(
+    uploadKey(userId, uploadId),
+    uploadId,
+    body.contentType,
+    config.limits.maxUploadBytes
+  );
+  return { uploadId, ...target };
+}
+
+/**
+ * The local backend's stand-in for the signed GCS PUT: stream the body to the
+ * upload's key, counting bytes, and refuse past the cap. Only reachable when no
+ * bucket is configured (the route is not registered otherwise).
+ */
+export async function receiveLocalUpload(
+  userId: string,
+  uploadId: string,
+  body: Readable
+): Promise<void> {
+  const location = parseStorageUri(uriForKey(uploadKey(userId, uploadId)));
+  if (location.backend !== "local") {
+    throw new Error("receiveLocalUpload called with a GCS bucket configured.");
+  }
+
+  /**
+   * The count is a stage IN the pipeline, not a "data" listener on the body: a
+   * listener switches the stream to flowing mode, and chunks emitted before the
+   * file stream is attached are lost — measured, the first version stored 0
+   * bytes. Past the cap it keeps READING and stops writing, then answers 413:
+   * failing the pipeline destroys the request stream, and the client gets a
+   * reset connection instead of the error (measured: the test hung).
+   */
+  let received = 0;
+  const max = config.limits.maxUploadBytes;
+  const counter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      received += chunk.length;
+      callback(null, received > max ? undefined : chunk);
+    },
+  });
+
+  await fsp.mkdir(path.dirname(location.filePath), { recursive: true });
+  try {
+    await pipeline(body, counter, fs.createWriteStream(location.filePath));
+  } catch (err) {
+    await fsp.rm(location.filePath, { force: true });
+    throw err;
+  }
+
+  if (received > max) {
+    await fsp.rm(location.filePath, { force: true });
+    throw tooLarge();
+  }
+}
+
+const isNotFound = (err: unknown): boolean => {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 404 || code === "ENOENT";
+};
+
+export interface CreateJobFromStoredUploadInput {
+  userId: string;
+  uploadId: string;
+  stages?: Stages;
+}
+
+/**
+ * Step 3 of a direct upload: the stored object becomes a job, through exactly
+ * the same ingest as a multipart upload.
+ *
+ * The key is built from the CALLER's id, so an upload id belonging to someone
+ * else simply is not found. The upload object is deleted afterwards whatever
+ * happened: a refused clip has nothing left to retry from (the user picks a
+ * different file), and an accepted one now lives under jobs/<id>/.
+ */
+export async function createJobFromStoredUpload(
+  ctx: Ctx,
+  input: CreateJobFromStoredUploadInput
+): Promise<CreateJobOutput> {
+  const { userId, uploadId, stages } = input;
+  const uri = uriForKey(uploadKey(userId, uploadId));
+
+  let size: number;
+  try {
+    size = await fileSize(uri);
+  } catch (err) {
+    if (!isNotFound(err)) throw err;
+    throw notFound("Upload not found. It may have expired; upload the file again.");
+  }
+
+  const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "localize-stored-upload-"));
+  try {
+    if (size > config.limits.maxUploadBytes) throw tooLarge();
+    await assertJobBudget(ctx, userId);
+
+    const uploadPath = path.join(workDir, "upload");
+    await downloadFile(uri, uploadPath);
+
+    return await createJobFromUpload(ctx, {
+      userId,
+      uploadPath,
+      ...(stages === undefined ? {} : { stages }),
+    });
+  } finally {
+    await fsp.rm(workDir, { recursive: true, force: true });
+    await deleteFile(uri).catch((err: unknown) => {
+      ctx.log.warn({ err, uploadId }, "could not delete an ingested upload");
+    });
   }
 }
 
@@ -345,15 +517,37 @@ export async function runJob(deps: RunDeps, jobId: string): Promise<void> {
       analysis: analyzed.analysis,
       adaptation,
       outDir: path.join(workDir, "synth"),
+      // The output is padded to the source's full length, trailing silence included.
+      sourceDurationSec: analyzed.evidence.durationSec,
     });
 
     const audioUri = await putFile(synthesis.audioUri, jobKey(jobId, "output.mp3"));
+
+    /**
+     * The lecture with the Hindi under it. Stage 4 placed every utterance on
+     * the source timeline, which is what makes a straight mux line up with the
+     * slides. A mux failure does NOT fail the job: the audio, the reasoning and
+     * the side-by-side players are the product, and the video is a view of them.
+     */
+    let outputVideoUri: string | undefined;
+    if (row.sourceVideoUri !== null) {
+      try {
+        const sourceVideo = path.join(workDir, "source.mp4");
+        const outputVideo = path.join(workDir, "output.mp4");
+        await downloadFile(row.sourceVideoUri, sourceVideo);
+        await muxVideoWithAudio(sourceVideo, synthesis.audioUri, outputVideo);
+        outputVideoUri = await putFile(outputVideo, jobKey(jobId, "output.mp4"));
+      } catch (err) {
+        log.error({ err }, "localize video mux failed; the job keeps its audio");
+      }
+    }
 
     await repo.updateStage(db, jobId, {
       status: "done",
       // The stage reports the path it wrote in its scratch dir, which is about
       // to be deleted. What the row needs is where the file now lives.
       synthesis: { ...synthesis, audioUri },
+      ...(outputVideoUri === undefined ? {} : { outputVideoUri }),
     });
 
     log.info(
@@ -422,6 +616,18 @@ export async function getDemoJob(ctx: Ctx): Promise<Job> {
  * Which stored file answers `/audio/:which` for a job, or a 404 if it does not
  * exist yet — a job still synthesizing has a source and no output.
  */
+export function videoUriFor(job: Job, which: AudioWhich): string {
+  const uri = which === "source" ? job.sourceVideoUri : job.outputVideoUri;
+  if (uri === null) {
+    throw notFound(
+      job.sourceVideoUri === null
+        ? "This job was made from an audio upload, so it has no video."
+        : "This job has no Hindi video yet."
+    );
+  }
+  return uri;
+}
+
 export function audioUriFor(job: Job, which: AudioWhich): string {
   const uri = which === "source" ? job.sourceUri : (job.synthesis?.audioUri ?? null);
   if (uri === null) {

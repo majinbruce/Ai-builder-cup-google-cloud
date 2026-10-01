@@ -34,6 +34,11 @@ import { config } from "../config/index.ts";
  * signed URL is also a bearer link that skips the owner check for its lifetime.
  * And the player seeks to a segment's start, which needs HTTP Range, which a
  * range-aware stream gives both backends identically.
+ *
+ * WRITES from the browser are the exception, since 2026-10-01: an upload goes
+ * straight to GCS on a signed PUT URL (createUploadTarget below), because
+ * Cloud Run refuses request bodies over 32 MiB. The service-account grant that
+ * reason one above calls missing is now made by deploy.sh.
  */
 
 /** Local backend root. Under outputs/, which is already gitignored. */
@@ -50,8 +55,32 @@ function getGcs(): Storage {
 }
 
 /** The key layout for one job's files. The only place it is spelled out. */
-export const jobKey = (jobId: string, file: "source.mp3" | "output.mp3"): string =>
-  `jobs/${jobId}/${file}`;
+export const jobKey = (
+  jobId: string,
+  file: "source.mp3" | "output.mp3" | "source.mp4" | "output.mp4"
+): string => `jobs/${jobId}/${file}`;
+
+/**
+ * Where a browser's direct upload lands before it becomes a job.
+ *
+ * The user id is IN the key, so a job can only ever be created from an upload
+ * under the caller's own prefix: ownership is the path, not a lookup. Objects
+ * here are deleted once ingested, and a bucket lifecycle rule (deploy.sh)
+ * removes abandoned ones after a day.
+ */
+export const uploadKey = (userId: string, uploadId: string): string =>
+  `uploads/${userId}/${uploadId}`;
+
+/** The URI a key has (or will have) on the configured backend. */
+export function uriForKey(key: string): string {
+  const bucket = config.gcs.bucket;
+  return bucket === null ? path.join(LOCAL_ROOT, key) : `${GCS_SCHEME}${bucket}/${key}`;
+}
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+};
 
 type Location =
   | { backend: "gcs"; bucket: string; key: string }
@@ -98,8 +127,95 @@ export async function putFile(localPath: string, key: string): Promise<string> {
 
   await getGcs()
     .bucket(bucket)
-    .upload(localPath, { destination: key, contentType: "audio/mpeg" });
+    .upload(localPath, {
+      destination: key,
+      contentType: CONTENT_TYPES[path.extname(key)] ?? "application/octet-stream",
+    });
   return `${GCS_SCHEME}${bucket}/${key}`;
+}
+
+/** Deletes a stored file. Missing is fine: the goal is that it is gone. */
+export async function deleteFile(uri: string): Promise<void> {
+  const location = parseStorageUri(uri);
+
+  if (location.backend === "local") {
+    await fsp.rm(location.filePath, { force: true });
+    return;
+  }
+
+  await getGcs()
+    .bucket(location.bucket)
+    .file(location.key)
+    .delete({ ignoreNotFound: true });
+}
+
+/** How long a signed upload URL stays valid. Long enough for 100 MB on a slow link. */
+export const UPLOAD_URL_TTL_MS = 15 * 60 * 1000;
+
+export interface UploadTarget {
+  /** Absolute (GCS) or same-origin relative (local backend). */
+  url: string;
+  method: "PUT";
+  /** Must be sent exactly: both are part of the V4 signature. */
+  headers: Record<string, string>;
+  expiresAt: string;
+}
+
+/**
+ * A URL the BROWSER uploads the file to, without the bytes touching our API.
+ *
+ * Why this exists: Cloud Run refuses HTTP/1 request bodies over 32 MiB, and an
+ * upload through the web service and then the API is two of them. A V4 signed
+ * PUT goes straight to GCS, which has no such cap.
+ *
+ * The size cap travels inside the signature as `x-goog-content-length-range`,
+ * so GCS itself rejects a larger body — the browser cannot drop the header or
+ * change it without invalidating the signature. Same for Content-Type.
+ *
+ * Signing on Cloud Run has no private key to sign with: the client library
+ * calls IAM signBlob as the runtime service account, which needs
+ * roles/iam.serviceAccountTokenCreator ON ITSELF (granted in deploy.sh).
+ *
+ * The local backend has no GCS to sign for, so it returns an API route that
+ * accepts the PUT instead (localize.routes.ts, registered only without a bucket).
+ */
+export async function createUploadTarget(
+  key: string,
+  uploadId: string,
+  contentType: string,
+  maxBytes: number
+): Promise<UploadTarget> {
+  const expires = Date.now() + UPLOAD_URL_TTL_MS;
+  const expiresAt = new Date(expires).toISOString();
+  const bucket = config.gcs.bucket;
+
+  if (bucket === null) {
+    return {
+      url: `/api/v1/localize/uploads/${uploadId}`,
+      method: "PUT",
+      headers: { "Content-Type": contentType },
+      expiresAt,
+    };
+  }
+
+  const lengthRange = `0,${maxBytes}`;
+  const [url] = await getGcs()
+    .bucket(bucket)
+    .file(key)
+    .getSignedUrl({
+      version: "v4",
+      action: "write",
+      expires,
+      contentType,
+      extensionHeaders: { "x-goog-content-length-range": lengthRange },
+    });
+
+  return {
+    url,
+    method: "PUT",
+    headers: { "Content-Type": contentType, "x-goog-content-length-range": lengthRange },
+    expiresAt,
+  };
 }
 
 /** Copies a stored file to a local path, so ffmpeg and Gemini can read it. */

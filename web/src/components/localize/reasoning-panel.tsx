@@ -13,6 +13,7 @@ import type {
   ModelCall,
   SegmentCritique,
   SynthesizedSegment,
+  SynthesizedUtterance,
 } from "@/lib/api/schemas";
 import { cn } from "@/lib/utils";
 import { Highlight, type Mark } from "@/components/localize/highlight";
@@ -23,13 +24,26 @@ import {
   formatTime,
 } from "@/components/localize/format";
 
+export interface OutputWindow {
+  startSec: number;
+  lengthSec: number;
+  sourceStartSec: number;
+  sourceEndSec: number;
+}
+
 export interface SegmentBundle {
   source: AnalyzedSegment;
   adapted: AdaptedSegment | undefined;
   critique: SegmentCritique | undefined;
   synth: SynthesizedSegment | undefined;
-  /** Where this segment starts in output.mp3: the sum of the ones before it. */
-  outputOffsetSec: number | undefined;
+  /** The TTS call this segment was spoken in. Undefined on jobs from before 2026-10-01. */
+  utterance: SynthesizedUtterance | undefined;
+  /**
+   * The stretch of output.mp3 that voices this segment, and the source stretch
+   * it covers. On newer jobs that is the whole utterance — a segment spoken
+   * mid-sentence has no audio boundary of its own to seek to.
+   */
+  output: OutputWindow | undefined;
   checks: EmphasisCheck[];
   retried: boolean;
   /** The calls that produced THIS segment's adaptation (adapt, and a retry). */
@@ -64,7 +78,7 @@ export function ReasoningPanel({
   glossary: Adaptation["brief"]["glossary"];
   onPlay: (which: "source" | "output") => void;
 }) {
-  const { source, adapted, critique, synth, checks, retried } = bundle;
+  const { source, adapted, critique, synth, utterance, checks, retried } = bundle;
   const [showLiteral, setShowLiteral] = useState(false);
 
   const sourceMarks: Mark[] = source.emphasis.map((marker) => {
@@ -125,8 +139,8 @@ export function ReasoningPanel({
 
       {/* 2. Original */}
       <Block
-        title="Original"
-        action={<PlayButton label="Play original" onClick={() => onPlay("source")} />}
+        title="What the teacher said"
+        action={<PlayButton label="Play English" onClick={() => onPlay("source")} />}
       >
         <p className="leading-relaxed">
           <Highlight text={source.text} marks={sourceMarks} />
@@ -163,7 +177,7 @@ export function ReasoningPanel({
         <Pending what="Hindi adaptation" />
       ) : (
         <Block
-          title="Adapted (Hindi)"
+          title="What the learner hears"
           action={
             <div className="flex gap-1">
               <Button
@@ -172,9 +186,9 @@ export function ReasoningPanel({
                 aria-pressed={showLiteral}
                 onClick={() => setShowLiteral((value) => !value)}
               >
-                {showLiteral ? "Hide" : "Show"} literal
+                {showLiteral ? "Hide" : "Compare with"} literal
               </Button>
-              {bundle.outputOffsetSec === undefined ? null : (
+              {bundle.output === undefined ? null : (
                 <PlayButton label="Play Hindi" onClick={() => onPlay("output")} />
               )}
             </div>
@@ -185,8 +199,8 @@ export function ReasoningPanel({
           </p>
           {showLiteral ? (
             <p lang="hi" className="mt-2 border-l-2 pl-3 text-muted-foreground">
-              <span className="block text-xs font-medium uppercase tracking-wide">
-                A literal translation would say
+              <span className="block text-xs font-medium" lang="en">
+                A word-for-word translation would say
               </span>
               {adapted.literalText}
             </p>
@@ -196,7 +210,7 @@ export function ReasoningPanel({
 
       {/* 4. Why */}
       {adapted === undefined ? null : (
-        <Block title="Why">
+        <Block title="Why it says it this way">
           <p className="leading-relaxed">{adapted.rationale}</p>
           {adapted.choices.length > 0 ? (
             <ul className="mt-3 grid gap-2">
@@ -233,7 +247,7 @@ export function ReasoningPanel({
       {critique === undefined ? (
         <Pending what="blind critique" />
       ) : (
-        <Block title="Check — blind back-translation">
+        <Block title="Checked by a critic that never saw the reasoning">
           {retried ? (
             <p className="mb-2 flex items-start gap-2 rounded-md bg-amber-500/10 p-2 text-xs">
               <RotateCcw className="mt-0.5 size-3.5 shrink-0" aria-hidden />
@@ -241,7 +255,10 @@ export function ReasoningPanel({
               failed the gate; the Hindi above is the one retry, kept regardless.
             </p>
           ) : null}
-          <p className="italic leading-relaxed">
+          <p className="text-xs text-muted-foreground">
+            The Hindi, read back into English:
+          </p>
+          <p className="mt-1 italic leading-relaxed">
             &ldquo;{critique.backTranslation}&rdquo;
           </p>
           <div className="mt-3 grid gap-2">
@@ -282,7 +299,7 @@ export function ReasoningPanel({
       {synth === undefined ? (
         <Pending what="synthesized audio" />
       ) : (
-        <Block title="Voice — exactly what was sent">
+        <Block title="How it was voiced">
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
             <dt className="text-muted-foreground">Voice</dt>
             <dd>{synth.voice}</dd>
@@ -290,26 +307,70 @@ export function ReasoningPanel({
             <dd className="tabular-nums">{synth.speakingRate.toFixed(2)}</dd>
             <dt className="text-muted-foreground">Lead pause</dt>
             <dd className="tabular-nums">{synth.pauseBeforeMs} ms</dd>
-            <dt className="text-muted-foreground">Pause before</dt>
-            <dd lang="hi">{synth.emphasisPausedTerm ?? "—"}</dd>
+            {utterance === undefined ? (
+              <>
+                <dt className="text-muted-foreground">Pause before</dt>
+                <dd lang="hi">{synth.emphasisPausedTerm ?? "—"}</dd>
+              </>
+            ) : null}
             <dt className="text-muted-foreground">Not voiced</dt>
             <dd lang="hi">
               {synth.emphasisNotRealized.length > 0
                 ? synth.emphasisNotRealized.join(", ")
                 : "—"}
             </dd>
-            <dt className="text-muted-foreground">Measured</dt>
-            <dd className="tabular-nums">
-              {synth.measuredDurationSec.toFixed(2)} s for a{" "}
-              {(source.endSec - source.startSec).toFixed(2)} s source span
-            </dd>
+            {utterance === undefined ? (
+              synth.measuredDurationSec === undefined ? null : (
+                <>
+                  <dt className="text-muted-foreground">Measured</dt>
+                  <dd className="tabular-nums">
+                    {synth.measuredDurationSec.toFixed(2)} s for a{" "}
+                    {(source.endSec - source.startSec).toFixed(2)} s source span
+                  </dd>
+                </>
+              )
+            ) : (
+              <>
+                {utterance.segmentIds.length > 1 ? (
+                  <>
+                    <dt className="text-muted-foreground">Spoken with</dt>
+                    <dd>
+                      {utterance.segmentIds.filter((id) => id !== source.id).join(", ")}{" "}
+                      <span className="text-muted-foreground">
+                        in one breath, so the sentence is not cut
+                      </span>
+                    </dd>
+                  </>
+                ) : null}
+                <dt className="text-muted-foreground">Measured</dt>
+                <dd className="tabular-nums">
+                  {utterance.measuredDurationSec.toFixed(2)} s at{" "}
+                  {formatTime(utterance.outputStartSec)}, for{" "}
+                  {(utterance.deadlineSec - utterance.sourceStartSec).toFixed(2)} s of
+                  source time
+                </dd>
+                <dt className="text-muted-foreground">Fit</dt>
+                <dd className="tabular-nums">
+                  {utterance.refit
+                    ? `first take ${utterance.naturalDurationSec.toFixed(2)} s ran long; ` +
+                      `re-taken at rate ${utterance.requestedRate.toFixed(2)} → ` +
+                      `${utterance.speakingRate.toFixed(2)}`
+                    : "fit at the requested rate"}
+                </dd>
+              </>
+            )}
           </dl>
-          <pre
-            className="mt-3 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 text-xs"
-            lang="hi"
-          >
-            {synth.markupUsed}
-          </pre>
+          <details className="mt-3 text-xs">
+            <summary className="cursor-pointer text-muted-foreground">
+              Exactly what was sent to Cloud Text-to-Speech
+            </summary>
+            <pre
+              className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2"
+              lang="hi"
+            >
+              {synth.markupUsed}
+            </pre>
+          </details>
         </Block>
       )}
 
@@ -319,12 +380,18 @@ export function ReasoningPanel({
         {bundle.ownCalls.map((call, index) => (
           <CallLine key={index} call={call} />
         ))}
-        {synth === undefined ? null : (
+        {utterance !== undefined ? (
+          <div>
+            tts · {utterance.billedChars} billed chars ·{" "}
+            {(utterance.latencyMs / 1000).toFixed(1)} s
+            {utterance.segmentIds.length > 1 ? " (shared utterance)" : ""}
+          </div>
+        ) : synth?.billedChars !== undefined && synth.latencyMs !== undefined ? (
           <div>
             tts · {synth.billedChars} billed chars · {(synth.latencyMs / 1000).toFixed(1)}{" "}
             s
           </div>
-        )}
+        ) : null}
         {bundle.sharedCalls.length > 0 ? (
           <details>
             <summary className="cursor-pointer">
@@ -352,9 +419,7 @@ function Block({
   return (
     <section className="grid gap-2" aria-label={title}>
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {title}
-        </h3>
+        <h3 className="text-sm font-semibold">{title}</h3>
         {action}
       </div>
       <div>{children}</div>

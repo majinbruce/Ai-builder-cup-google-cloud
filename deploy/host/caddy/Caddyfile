@@ -77,12 +77,14 @@
 		#               inline styles and the theme class script.
 		#   img-src     https: and data: so the OAuth avatar (a Google URL) and
 		#               inlined SVG/data-URI icons render.
-		#   connect-src 'self' — every fetch is a relative path to this origin.
+		#   connect-src 'self' plus storage.googleapis.com — every fetch is a
+		#               relative path to this origin, except the upload PUT,
+		#               which goes straight to GCS on a signed URL.
 		#   frame-ancestors 'self' — the CSP-native twin of X-Frame-Options.
 		#   base-uri / form-action 'self' — no off-origin <base> or form post.
 		#
 		# object-src 'none' kills the legacy plugin vector outright.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://storage.googleapis.com; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'"
 		-Server
 	}
 

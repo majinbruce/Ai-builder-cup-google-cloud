@@ -482,16 +482,26 @@ export const SynthesizedSegment = z.object({
    * MEASURED_CHARS_PER_SEC was arithmetic — a character count divided by an
    * assumed constant — and docs/JUDGE_NOTES.md committed to replacing it with a
    * measured value the moment real audio existed. Real audio is this.
+   *
+   * Absent since 2026-10-01 (see SynthesizedUtterance): a segment voiced inside
+   * a longer utterance has no audio of its own to measure, and a share of the
+   * utterance's length would be an estimate. Present on jobs from before then.
    */
-  measuredDurationSec: z.number().positive(),
+  measuredDurationSec: z.number().positive().optional(),
   /**
    * Cloud TTS bills per character of the REQUEST, tags included, not per
    * character of speech. Recorded because SPEC section e sells per-call
    * telemetry as evidence that the visible reasoning is worth its cost, and a
    * pipeline that stops counting at the last stage is not making that case.
    */
-  billedChars: z.number().int().nonnegative(),
-  latencyMs: z.number().int().nonnegative(),
+  billedChars: z.number().int().nonnegative().optional(),
+  latencyMs: z.number().int().nonnegative().optional(),
+  /**
+   * Index into `Synthesis.utterances` of the TTS call this segment was spoken
+   * in. Billing, latency and measured duration live there. Absent on jobs from
+   * before utterances existed, which carry those three fields per segment.
+   */
+  utterance: z.number().int().nonnegative().optional(),
   /**
    * Emphasis terms the adapter asked for that do NOT occur in its own
    * targetText, so nothing could be wrapped.
@@ -533,11 +543,62 @@ export const SynthesizedSegment = z.object({
   emphasisNotRealized: z.array(z.string()),
 });
 
+/**
+ * One Cloud TTS call: consecutive segments spoken as a single breath, placed on
+ * the source timeline.
+ *
+ * Added 2026-10-01. Until then each segment was its own call, and listening to
+ * the demo showed what that costs: Chirp 3 HD speaks every request as a complete
+ * utterance, so a segment ending mid-sentence on a comma got a full stop's
+ * falling ending, and the next call restarted from neutral — audibly "a new
+ * voice". An inline `<break>` did the same thing inside a segment (measured: a
+ * 150 ms request produced a 0.64-1.07 s hole and a restart). So segments are now
+ * grouped until a sentence ends, there are no inline tags, and every pause is
+ * silence this stage inserts itself.
+ *
+ * The timeline is the other half. Each utterance starts no earlier than the
+ * English it replaces; one that would run into the next utterance's start is
+ * synthesized once more at a faster `speaking_rate`. That is what makes the
+ * Hindi track as long as the source and keeps it in step with the video.
+ */
+export const SynthesizedUtterance = z.object({
+  index: z.number().int().nonnegative(),
+  segmentIds: z.array(z.string()).min(1),
+  /** Where the first segment starts in the SOURCE. The utterance never starts earlier. */
+  sourceStartSec: z.number().nonnegative(),
+  /** Where the next utterance starts in the source (or the clip ends): the deadline. */
+  deadlineSec: z.number().positive(),
+  /** The exact string sent to Cloud TTS. */
+  markupUsed: z.string(),
+  inputMode: z.enum(["text", "markup", "ssml"]),
+  /** The adapter's `speakingRate`s, weighted by each segment's source span. */
+  requestedRate: z.number(),
+  /** The rate of the take that was kept. Above requestedRate only when refit. */
+  speakingRate: z.number(),
+  /** The first take, at requestedRate. Kept so a refit can be judged against it. */
+  naturalDurationSec: z.number().positive(),
+  /** The take that was kept, ffprobe'd. */
+  measuredDurationSec: z.number().positive(),
+  /** True when a second, faster take was made because the first missed its deadline. */
+  refit: z.boolean(),
+  /** Silence placed before it for the first segment's `pauseBefore`. */
+  pauseBeforeMs: z.number().int().nonnegative(),
+  /** Where it starts in output.mp3. */
+  outputStartSec: z.number().nonnegative(),
+  /** Both takes, when there were two. */
+  billedChars: z.number().int().nonnegative(),
+  latencyMs: z.number().int().nonnegative(),
+});
+
 export const Synthesis = z.object({
   audioUri: z.string(),
   durationSec: z.number().positive(),
   voice: z.string(),
   segments: z.array(SynthesizedSegment).min(1),
+  /** Absent on jobs from before 2026-10-01; see SynthesizedUtterance. */
+  utterances: z.array(SynthesizedUtterance).min(1).optional(),
+  /** The length the output was fitted to. Absent on jobs from before 2026-10-01. */
+  sourceDurationSec: z.number().positive().optional(),
   /** Whole-job billable characters — the stage's cost, in Google's own unit. */
   billedChars: z.number().int().nonnegative(),
   /**
@@ -552,6 +613,7 @@ export const Synthesis = z.object({
 });
 
 export type SynthesizedSegment = z.infer<typeof SynthesizedSegment>;
+export type SynthesizedUtterance = z.infer<typeof SynthesizedUtterance>;
 export type Synthesis = z.infer<typeof Synthesis>;
 
 /**
@@ -593,6 +655,10 @@ export const Job = z.object({
   status: JobStatus,
   targetLanguage: z.string(),
   sourceUri: z.string().nullable(),
+  /** Set only when the upload had playable footage; audio uploads stay null. */
+  sourceVideoUri: z.string().nullable(),
+  /** The footage with the Hindi under it. Null until done, or if the mux failed. */
+  outputVideoUri: z.string().nullable(),
   error: z.string().nullable(),
   analysis: Analysis.nullable(),
   corroboration: Corroboration.nullable(),
@@ -625,6 +691,32 @@ export const AudioWhich = z.enum(["source", "output"]);
 export const JobAudioParams = z.object({ id: z.uuid(), which: AudioWhich });
 export const DemoAudioParams = z.object({ which: AudioWhich });
 
+/**
+ * Types an upload may declare. Audio of any kind, and mp4 — the one video
+ * container every browser plays, which is what the side-by-side player needs.
+ */
+export const ACCEPTED_UPLOAD_TYPE = /^(audio\/[\w.+-]+|video\/mp4)$/;
+
+/** Step 1 of a direct upload: ask where to put the file. */
+export const CreateUploadBody = z.strictObject({
+  contentType: z.string().regex(ACCEPTED_UPLOAD_TYPE, "Must be an audio file or an mp4 video."),
+  sizeBytes: z.number().int().positive(),
+});
+
+/** Where and how the browser PUTs the file. Headers must be sent exactly. */
+export const UploadTarget = z.object({
+  uploadId: z.uuid(),
+  url: z.string(),
+  method: z.literal("PUT"),
+  headers: z.record(z.string(), z.string()),
+  expiresAt: z.iso.datetime(),
+});
+
+export const UploadIdParams = z.object({ uploadId: z.uuid() });
+
+/** Step 3: turn the uploaded object into a job. */
+export const CreateJobFromUploadBody = z.strictObject({ uploadId: z.uuid() });
+
 export const ListJobsQuery = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
@@ -635,6 +727,8 @@ export type Job = z.infer<typeof Job>;
 export type JobSummary = z.infer<typeof JobSummary>;
 export type AudioWhich = z.infer<typeof AudioWhich>;
 export type ListJobsQuery = z.infer<typeof ListJobsQuery>;
+export type CreateUploadBody = z.infer<typeof CreateUploadBody>;
+export type UploadTarget = z.infer<typeof UploadTarget>;
 
 export type ChoiceKind = z.infer<typeof ChoiceKind>;
 export type AdaptationChoice = z.infer<typeof AdaptationChoice>;

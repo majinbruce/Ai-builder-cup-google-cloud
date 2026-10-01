@@ -34,13 +34,20 @@ export interface StageWrite {
   critique?: Critique;
   retriedIds?: string[];
   synthesis?: Synthesis;
+  outputVideoUri?: string;
   /** The FULL call list so far — replaced, not appended, so a write is idempotent. */
   calls?: ModelCall[];
 }
 
 export const insert = async (
   db: Database,
-  values: { id: string; userId: string; targetLanguage: string; sourceUri: string }
+  values: {
+    id: string;
+    userId: string;
+    targetLanguage: string;
+    sourceUri: string;
+    sourceVideoUri?: string;
+  }
 ): Promise<LocalizeJobRow> => {
   const [row] = await db
     .insert(localizeJobs)
@@ -121,11 +128,20 @@ export const listForUser = async (
     .offset(offset);
 
   const first = rows[0];
+  if (first !== undefined) {
+    return { rows: rows.map((entry) => entry.job), total: Number(first.totalCount) };
+  }
 
-  return {
-    rows: rows.map((entry) => entry.job),
-    total: first ? Number(first.totalCount) : 0,
-  };
+  // The window count rides on the returned rows, so a page past the end has
+  // none to carry it — and would report total 0 for a user who has jobs.
+  if (offset === 0) return { rows: [], total: 0 };
+
+  const [row] = await db
+    .select({ total: count() })
+    .from(localizeJobs)
+    .where(eq(localizeJobs.userId, userId));
+
+  return { rows: [], total: row?.total ?? 0 };
 };
 
 /**
@@ -268,6 +284,8 @@ export const toDto = (row: LocalizeJobRow): Job => ({
   status: row.status,
   targetLanguage: row.targetLanguage,
   sourceUri: row.sourceUri,
+  sourceVideoUri: row.sourceVideoUri,
+  outputVideoUri: row.outputVideoUri,
   error: row.error,
   analysis: nullable(Analysis, row.analysis),
   corroboration: nullable(Corroboration, row.corroboration),

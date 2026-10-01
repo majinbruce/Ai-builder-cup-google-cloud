@@ -85,7 +85,7 @@ log "enabling APIs"
 gc services enable run.googleapis.com sqladmin.googleapis.com sql-component.googleapis.com \
   cloudbuild.googleapis.com artifactregistry.googleapis.com \
   secretmanager.googleapis.com storage.googleapis.com \
-  texttospeech.googleapis.com iam.googleapis.com
+  texttospeech.googleapis.com iam.googleapis.com iamcredentials.googleapis.com
 
 # ── 2. Artifact Registry ────────────────────────────────────────────────────
 if ! gc artifacts repositories describe "$REPO" --location="$REGION" >/dev/null 2>&1; then
@@ -94,13 +94,34 @@ if ! gc artifacts repositories describe "$REPO" --location="$REGION" >/dev/null 
 fi
 
 # ── 3. Bucket ───────────────────────────────────────────────────────────────
-# No lifecycle rule, deliberately: setup.sh offers a 30-day delete, and the
-# promoted demo job's audio lives in this bucket through judging (5 Oct - 6 Nov).
+# No lifecycle rule on jobs/, deliberately: setup.sh offers a 30-day delete, and
+# the promoted demo job's files live in this bucket through judging (5 Oct -
+# 6 Nov). The one rule is on uploads/, where a direct upload waits only until
+# /jobs/from-upload ingests and deletes it; an abandoned one goes after a day.
 if ! gc storage buckets describe "gs://${BUCKET}" >/dev/null 2>&1; then
   log "creating gs://${BUCKET}"
   gc storage buckets create "gs://${BUCKET}" --location="$REGION" \
     --uniform-bucket-level-access --public-access-prevention
 fi
+
+# The browser PUTs uploads straight to the bucket on a V4 signed URL, which is
+# cross-origin from the web service, so the bucket must answer the preflight.
+# Both request headers are part of the signature, so both must be allowed.
+# Public access prevention stays on: a signed URL is not public access.
+log "setting bucket CORS and the uploads/ lifecycle rule"
+bucket_cfg="$(mktemp -d)"
+cat >"$bucket_cfg/cors.json" <<JSON
+[{"origin": ["${WEB_URL}"], "method": ["PUT"],
+  "responseHeader": ["Content-Type", "x-goog-content-length-range"],
+  "maxAgeSeconds": 3600}]
+JSON
+cat >"$bucket_cfg/lifecycle.json" <<'JSON'
+{"rule": [{"action": {"type": "Delete"},
+           "condition": {"age": 1, "matchesPrefix": ["uploads/"]}}]}
+JSON
+gc storage buckets update "gs://${BUCKET}" \
+  --cors-file="$bucket_cfg/cors.json" --lifecycle-file="$bucket_cfg/lifecycle.json" >/dev/null
+rm -rf "$bucket_cfg"
 
 # ── 4. Runtime service account ──────────────────────────────────────────────
 # One identity for the API service and the ops job, holding only what they use.
@@ -118,6 +139,11 @@ for role in roles/cloudsql.client roles/secretmanager.secretAccessor \
   gc projects add-iam-policy-binding "$PROJECT" --condition=None \
     --member="serviceAccount:${SA_EMAIL}" --role="$role" >/dev/null
 done
+# Signing upload URLs. Cloud Run gives the SA no private key, so the storage
+# client signs through IAM signBlob AS the SA — which needs TokenCreator on
+# itself, scoped to this one SA rather than the project.
+gc iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+  --member="serviceAccount:${SA_EMAIL}" --role=roles/iam.serviceAccountTokenCreator >/dev/null
 
 # ── 5. Secrets ──────────────────────────────────────────────────────────────
 # put_secret NAME VALUE — creates the secret with VALUE only if it does not
@@ -222,7 +248,7 @@ log "deploying $API_SVC"
 gc run deploy "$API_SVC" --region="$REGION" --image="$IMAGE_BASE/api:$SHA" \
   --service-account="$SA_EMAIL" --add-cloudsql-instances="$SQL_CONN" \
   --set-env-vars="$API_ENV" --set-secrets="$API_SECRETS" \
-  --port=3000 --cpu=1 --memory=1Gi \
+  --port=3000 --cpu=1 --memory=2Gi \
   --no-cpu-throttling --min-instances=1 --max-instances=1 \
   --timeout=300 --allow-unauthenticated
 

@@ -245,68 +245,58 @@ export function printCalls(calls: ModelCall[]): void {
 }
 
 /**
- * Stage 4's report: how each segment was actually spoken.
+ * Stage 4's report: how each utterance was spoken and where it was placed.
  *
  * The verbatim `markupUsed` is the point. SPEC section d item 6 promises the
  * reasoning panel shows the exact TTS settings applied, and this is the terminal
  * version of that promise — a reader can copy a line out of here into the API
  * explorer and get the same audio back. House style per this file's header:
- * print the misses, which here are emphasis terms that could not be applied and
- * segments whose Hindi runs long against their source span.
+ * print the misses, which here are emphasis terms absent from their own Hindi and
+ * utterances that needed a faster re-take to fit their source time.
  */
 export function printSynthesis(synthesis: Synthesis): void {
-  out("  --- how each segment was spoken (measured, not estimated) ---");
+  const utterances = synthesis.utterances ?? [];
+  const sourceSec = synthesis.sourceDurationSec ?? 0;
+
+  out("  --- how each utterance was spoken and placed (measured, not estimated) ---");
   out();
-  out("  id    source   spoken   drift    rate   pause  emphasis");
+  out("  #   segments        at      slot   1st take   kept    rate   refit");
 
-  for (const segment of synthesis.segments) {
-    const sourceSec = segment.endSec - segment.startSec;
-    const drift = sourceSec === 0 ? 0 : (segment.measuredDurationSec - sourceSec) / sourceSec;
-    const paused = segment.emphasisPausedTerm;
-
+  for (const utterance of utterances) {
+    const slot = utterance.deadlineSec - utterance.sourceStartSec;
     out(
-      `  ${segment.id.padEnd(5)} ${`${sourceSec.toFixed(1)}s`.padStart(6)} ` +
-        `${`${segment.measuredDurationSec.toFixed(1)}s`.padStart(8)} ` +
-        `${`${drift >= 0 ? "+" : ""}${(drift * 100).toFixed(0)}%`.padStart(7)}  ` +
-        `${segment.speakingRate.toFixed(2)}  ${(segment.pauseBeforeMs === 0 ? "—" : String(segment.pauseBeforeMs)).padStart(5)}  ` +
-        `${paused === null ? "none" : `pause before "${paused}"`}`
+      `  ${String(utterance.index).padEnd(3)} ${utterance.segmentIds.join("+").padEnd(14)} ` +
+        `${`${utterance.outputStartSec.toFixed(1)}s`.padStart(6)} ` +
+        `${`${slot.toFixed(1)}s`.padStart(8)} ` +
+        `${`${utterance.naturalDurationSec.toFixed(1)}s`.padStart(9)} ` +
+        `${`${utterance.measuredDurationSec.toFixed(1)}s`.padStart(7)}  ` +
+        `${utterance.requestedRate.toFixed(2)}${utterance.refit ? `→${utterance.speakingRate.toFixed(2)}` : "     "}  ` +
+        `${utterance.refit ? "yes" : "—"}`
     );
   }
   out();
 
-  for (const segment of synthesis.segments) {
-    out(`  ${segment.id} sent (${segment.inputMode}, ${segment.billedChars} billed chars, ${segment.latencyMs} ms):`);
-    out(`      ${segment.markupUsed}`);
-    if (segment.emphasisNotRealized.length > 0) {
-      out(
-        `      NOT REALIZED in audio (shown in the panel, not marked acoustically): ` +
-          `${segment.emphasisNotRealized.map((term) => `"${term}"`).join(", ")}`
-      );
-    }
-    if (segment.emphasisNotFound.length > 0) {
-      out(
-        `      NOT APPLIED — these emphasis terms do not occur in the segment's own ` +
-          `Hindi: ${segment.emphasisNotFound.map((term) => `"${term}"`).join(", ")}`
-      );
-    }
+  for (const utterance of utterances) {
+    out(
+      `  #${utterance.index} sent (${utterance.inputMode}, ${utterance.billedChars} billed chars, ` +
+        `${utterance.latencyMs} ms${utterance.pauseBeforeMs > 0 ? `, ${utterance.pauseBeforeMs} ms silence before` : ""}):`
+    );
+    out(`      ${utterance.markupUsed}`);
     out();
   }
 
   const notFound = synthesis.segments.flatMap((segment) => segment.emphasisNotFound);
-  const notRealized = synthesis.segments.flatMap((s2) => s2.emphasisNotRealized);
-  const marked = synthesis.segments.filter((s2) => s2.emphasisPausedTerm !== null).length;
-
   out(
     notFound.length === 0
       ? "  Every emphasis term stage 2 asked for occurs in its own Hindi."
-      : `  ${notFound.length} emphasis term(s) do NOT occur in their own segment's Hindi — see above.`
+      : `  ${notFound.length} emphasis term(s) do NOT occur in their own segment's Hindi: ` +
+          notFound.map((term) => `"${term}"`).join(", ")
   );
   out(
-    `  ${marked}/${synthesis.segments.length} segments carry a pause before one term; ` +
-      `${notRealized.length} further term(s) are shown in the panel but not marked in audio.`
+    `  ${utterances.filter((utterance) => utterance.refit).length}/${utterances.length} ` +
+      `utterances re-taken faster to meet their deadline. Output ${synthesis.durationSec.toFixed(1)}s ` +
+      `for a ${sourceSec.toFixed(1)}s source.`
   );
-  out("  Per-term STRESS is not achievable on this voice — see the spike verdict in");
-  out("  docs/research.md. A pause is a pause, and that is what these fields say.");
   out();
 }
 
@@ -327,8 +317,8 @@ export function printMeasuredTiming(
     (total, segment) => total + (segment.endSec - segment.startSec),
     0
   );
-  const spokenSec = synthesis.segments.reduce(
-    (total, segment) => total + segment.measuredDurationSec,
+  const spokenSec = (synthesis.utterances ?? []).reduce(
+    (total, utterance) => total + utterance.measuredDurationSec,
     0
   );
   const estimated = measureDrift(analysis.segments, adaptation.segments);

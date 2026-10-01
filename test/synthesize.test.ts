@@ -1,22 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { escapeConcatPath } from "../src/lib/ffmpeg.ts";
+import { escapeConcatPath, parseHasPlayableVideo } from "../src/lib/ffmpeg.ts";
 import { MAX_SPEAKING_RATE, MIN_SPEAKING_RATE, clampSpeakingRate } from "../src/lib/tts.ts";
 import { MEASURED_CHARS_PER_SEC } from "../src/modules/localize/drift.ts";
+import { readPcmFormat, silenceWav } from "../src/lib/wav.ts";
 import {
-  EMPHASIS_PAUSE_MS,
+  MAX_FIT_SPEEDUP,
+  MAX_UTTERANCE_BYTES,
   PAUSE_MS,
-  buildTtsInput,
-  escapeSsml,
+  endsSentence,
+  groupIntoUtterances,
+  placeOnTimeline,
+  planFit,
+  type TimelineSlot,
 } from "../src/modules/localize/synthesize.stage.ts";
-import { SynthesizedSegment } from "../src/modules/localize/localize.schemas.ts";
-import type { AdaptedSegment } from "../src/modules/localize/localize.schemas.ts";
+import {
+  Synthesis,
+  SynthesizedSegment,
+} from "../src/modules/localize/localize.schemas.ts";
+import type {
+  AdaptedSegment,
+  AnalyzedSegment,
+} from "../src/modules/localize/localize.schemas.ts";
 
 /**
  * Stage 4's decisions, provable without a credential, a network or ffmpeg.
  *
  * The split this suite depends on is the one the stage is built around: every
- * choice about WHAT to send lives in buildTtsInput(), which is pure, so the
- * request that reaches Cloud TTS is inspectable by a test. That matters more here
+ * choice about WHAT to send and WHERE it goes lives in pure functions
+ * (groupIntoUtterances, planFit, placeOnTimeline), so the request that reaches
+ * Cloud TTS and the timeline it lands on are inspectable by a test. That matters more here
  * than in the earlier stages, because `markupUsed` is shown to a user as a claim
  * about what was applied — and a claim about a request should be checked against
  * the request, not against a description of it.
@@ -41,129 +53,223 @@ function segment(overrides: Partial<AdaptedSegment> = {}): AdaptedSegment {
   };
 }
 
-describe("escapeSsml", () => {
-  it("escapes the five characters that would break an SSML document", () => {
-    expect(escapeSsml('a & b < c > d "e"')).toBe(
-      "a &amp; b &lt; c &gt; d &quot;e&quot;"
-    );
-  });
+/** Only the fields groupIntoUtterances reads. */
+function sources(spans: [string, number, number][]): Map<string, AnalyzedSegment> {
+  return new Map(
+    spans.map(([id, startSec, endSec]) => [id, { id, startSec, endSec } as AnalyzedSegment])
+  );
+}
 
-  it("escapes the ampersand first, so an escape is not double-escaped", () => {
-    // "&lt;" arriving as literal text must survive as "&amp;lt;", not "&lt;".
-    expect(escapeSsml("&lt;")).toBe("&amp;lt;");
-  });
-
-  it("leaves Devanagari untouched", () => {
-    const hindi = "यह एक क्लोज़र है।";
-    expect(escapeSsml(hindi)).toBe(hindi);
-  });
-});
-
-describe("buildTtsInput — the request that actually goes over the wire", () => {
-  it("sends ssml, because that is the only mode <break> works in", () => {
-    const built = buildTtsInput(segment());
-    expect(built.input.mode).toBe("ssml");
-    expect(built.input.content.startsWith("<speak>")).toBe(true);
-    expect(built.input.content.endsWith("</speak>")).toBe(true);
-  });
-
-  it("never emits inline <prosody> or <emphasis>", () => {
-    // The Phase 3 spike measured these ignoring their own rate attribute and
-    // inserting ~1.4s of dead time per tag instead: <prosody rate="1.0">, a
-    // semantic no-op, moved the duration as much as rate="slow" did. An earlier
-    // build wrapped every stressed term and made the fixture 41% long. This test
-    // exists so that cannot come back by way of someone reading SPEC section b's
-    // conditional without reading docs/research.md's answer to it.
-    const built = buildTtsInput(
-      segment({ emphasisTerms: ["क्लोज़र", "ज़रूरी"] })
-    );
-    expect(built.input.content).not.toContain("<prosody");
-    expect(built.input.content).not.toContain("<emphasis");
-  });
-
-  it("marks exactly one term per segment, however many were requested", () => {
-    const built = buildTtsInput(
-      segment({ emphasisTerms: ["क्लोज़र", "ज़रूरी", "यह"] })
-    );
-    const breaks = built.input.content.match(/<break /g) ?? [];
-    expect(breaks).toHaveLength(1);
-    expect(built.emphasisPausedTerm).toBe("क्लोज़र");
-    expect(built.emphasisNotRealized).toEqual(["ज़रूरी", "यह"]);
-  });
-
-  it("puts the emphasis break immediately before the term, not after it", () => {
-    const built = buildTtsInput(segment());
-    expect(built.input.content).toContain(
-      `<break time="${EMPHASIS_PAUSE_MS}ms"/>क्लोज़र`
-    );
-  });
-
-  it("marks only the first occurrence of a term that recurs", () => {
-    const built = buildTtsInput(
-      segment({ targetText: "क्लोज़र और क्लोज़र", emphasisTerms: ["क्लोज़र"] })
-    );
-    const breaks = built.input.content.match(/<break /g) ?? [];
-    expect(breaks).toHaveLength(1);
-  });
-
-  it.each([
-    ["none", 0],
-    ["short", PAUSE_MS.short],
-    ["long", PAUSE_MS.long],
-  ] as const)("realizes pauseBefore=%s as %ims", (pauseBefore, expected) => {
-    const built = buildTtsInput(
-      segment({
-        emphasisTerms: [],
-        ttsHints: { speakingRate: 1.0, pauseBefore, style: "x" },
-      })
-    );
-
-    expect(built.pauseBeforeMs).toBe(expected);
-    if (expected === 0) {
-      expect(built.input.content).not.toContain("<break");
-    } else {
-      expect(built.input.content).toContain(`<speak><break time="${expected}ms"/>`);
+describe("endsSentence", () => {
+  it("recognises the danda, question and exclamation marks, and a full stop", () => {
+    for (const text of ["यह है।", "क्या होगा?", "वाह!", "That is it.", "॥"]) {
+      expect(endsSentence(text)).toBe(true);
     }
   });
 
-  it("reports pauseBeforeMs separately from the markup", () => {
-    // A segment whose first emphasis term opens the sentence produces a <break>
-    // in the leading position that is NOT a lead pause. The panel has to tell
-    // those apart, and grepping the rendered string cannot.
-    const built = buildTtsInput(
-      segment({ targetText: "क्लोज़र है।", emphasisTerms: ["क्लोज़र"] })
+  it("looks past closing quotes and trailing space", () => {
+    expect(endsSentence("उसने कहा, “रुको।” ")).toBe(true);
+  });
+
+  it("does not treat a comma or a dash as an ending", () => {
+    // The demo's s02 ended "…एक्सेलरेट करती है," — spoken alone, that comma got
+    // a full stop's falling ending, which is the bug this grouping exists for.
+    expect(endsSentence("ग्रैविटी आपको एक्सेलरेट करती है,")).toBe(false);
+    expect(endsSentence("जो ठीक नीचे न हो—")).toBe(false);
+  });
+});
+
+describe("groupIntoUtterances — the units actually spoken", () => {
+  const map = sources([
+    ["s01", 0, 10],
+    ["s02", 10, 18],
+    ["s03", 18, 31],
+    ["s04", 31, 38],
+  ]);
+
+  it("joins a segment that ends mid-sentence to the next, so the voice never restarts mid-sentence", () => {
+    const groups = groupIntoUtterances(
+      [
+        segment({ id: "s01", targetText: "पहला वाक्य।" }),
+        segment({ id: "s02", targetText: "दूसरा शुरू होता है," }),
+        segment({ id: "s03", targetText: "और यहाँ खत्म होता है।" }),
+        segment({ id: "s04", targetText: "चौथा?" }),
+      ],
+      map
     );
-    expect(built.input.content.startsWith('<speak><break time="150ms"/>')).toBe(true);
-    expect(built.pauseBeforeMs).toBe(0);
+    expect(groups.map((group) => group.segments.map((s) => s.id))).toEqual([
+      ["s01"],
+      ["s02", "s03"],
+      ["s04"],
+    ]);
+    expect(groups[1]?.text).toBe("दूसरा शुरू होता है, और यहाँ खत्म होता है।");
+    expect(groups[1]?.sourceStartSec).toBe(10);
   });
 
-  it("collects an emphasis term that does not occur in its own targetText", () => {
-    const built = buildTtsInput(
-      segment({ emphasisTerms: ["इनवेरिएंट", "क्लोज़र"] })
+  it("starts a new utterance at a requested pause, so the pause is silence between calls", () => {
+    const groups = groupIntoUtterances(
+      [
+        segment({ id: "s01", targetText: "शुरू होता है," }),
+        segment({
+          id: "s02",
+          targetText: "और ध्यान दीजिए।",
+          ttsHints: { speakingRate: 1, pauseBefore: "long", style: "x" },
+        }),
+      ],
+      map
     );
-    expect(built.emphasisNotFound).toEqual(["इनवेरिएंट"]);
-    // and the one that IS present still gets marked
-    expect(built.emphasisPausedTerm).toBe("क्लोज़र");
+    expect(groups).toHaveLength(2);
+    expect(groups[1]?.pauseBeforeMs).toBe(PAUSE_MS.long);
   });
 
-  it("escapes the Hindi before inserting tags, not after", () => {
-    const built = buildTtsInput(
-      segment({ targetText: "a < b है", emphasisTerms: [] })
+  it("never sends inline markup: the request is the Hindi, space-joined", () => {
+    const groups = groupIntoUtterances(
+      [segment({ id: "s01", targetText: "a < b और c & d है।", emphasisTerms: ["c"] })],
+      map
     );
-    expect(built.input.content).toBe("<speak>a &lt; b है</speak>");
+    expect(groups[0]?.text).toBe("a < b और c & d है।");
+    expect(groups[0]?.text).not.toContain("<break");
   });
 
-  it("ignores a whitespace-only emphasis term rather than marking nothing", () => {
-    const built = buildTtsInput(segment({ emphasisTerms: ["   ", "क्लोज़र"] }));
-    expect(built.emphasisPausedTerm).toBe("क्लोज़र");
+  it("weights the requested rate by each segment's source span", () => {
+    const groups = groupIntoUtterances(
+      [
+        segment({
+          id: "s01",
+          targetText: "धीमी परिभाषा,",
+          ttsHints: { speakingRate: 0.8, pauseBefore: "none", style: "x" },
+        }),
+        segment({
+          id: "s02",
+          targetText: "तेज़ बात।",
+          ttsHints: { speakingRate: 1.2, pauseBefore: "none", style: "x" },
+        }),
+      ],
+      map
+    );
+    // (0.8 × 10 + 1.2 × 8) / 18
+    expect(groups[0]?.requestedRate).toBeCloseTo(0.978, 3);
   });
 
-  it("passes the segment rate through, clamped to what the API accepts", () => {
-    expect(
-      buildTtsInput(
-        segment({ ttsHints: { speakingRate: 0.92, pauseBefore: "none", style: "x" } })
-      ).speakingRate
-    ).toBe(0.92);
+  it("splits before the TTS input limit, even mid-sentence", () => {
+    // ~1,350 bytes each: three fit under the ceiling, four would not.
+    const long = "क".repeat(450) + ",";
+    const groups = groupIntoUtterances(
+      ["s01", "s02", "s03", "s04"].map((id) => segment({ id, targetText: long })),
+      map
+    );
+    expect(groups.length).toBeGreaterThan(1);
+    for (const group of groups) {
+      expect(Buffer.byteLength(group.text, "utf8")).toBeLessThanOrEqual(MAX_UTTERANCE_BYTES);
+    }
+  });
+});
+
+describe("placeOnTimeline — where each utterance lands in the output", () => {
+  const slot = (overrides: Partial<TimelineSlot>): TimelineSlot => ({
+    sourceStartSec: 0,
+    deadlineSec: 10,
+    pauseBeforeMs: 0,
+    durationSec: 5,
+    ...overrides,
+  });
+
+  it("starts each utterance at its source start, never earlier", () => {
+    const placed = placeOnTimeline([
+      slot({ sourceStartSec: 0, durationSec: 4 }),
+      slot({ sourceStartSec: 10, durationSec: 3 }),
+    ]);
+    expect(placed.startSec).toEqual([0, 10]);
+    expect(placed.endSec).toBe(13);
+  });
+
+  it("pushes an utterance back when the previous one ran long", () => {
+    const placed = placeOnTimeline([
+      slot({ sourceStartSec: 0, durationSec: 12 }),
+      slot({ sourceStartSec: 10, durationSec: 3 }),
+    ]);
+    expect(placed.startSec).toEqual([0, 12]);
+  });
+
+  it("keeps a requested pause even when the gap is too short for it", () => {
+    const placed = placeOnTimeline([
+      slot({ sourceStartSec: 0, durationSec: 9.8 }),
+      slot({ sourceStartSec: 10, pauseBeforeMs: 700, durationSec: 3 }),
+    ]);
+    expect(placed.startSec[1]).toBeCloseTo(10.5, 6);
+  });
+});
+
+describe("planFit — which utterances get a faster re-take", () => {
+  it("leaves an utterance that fits alone", () => {
+    expect(planFit([{ sourceStartSec: 0, deadlineSec: 10, pauseBeforeMs: 0, durationSec: 9.5 }], [1])).toEqual([null]);
+  });
+
+  it("ignores an overrun inside the noise tolerance", () => {
+    expect(planFit([{ sourceStartSec: 0, deadlineSec: 10, pauseBeforeMs: 0, durationSec: 10.1 }], [1])).toEqual([null]);
+  });
+
+  it("speeds an overrunning utterance up to land just inside its deadline", () => {
+    // The demo's s01: 12.19 s of Hindi for 10.2 s of English, at rate 1.
+    const [rate] = planFit(
+      [{ sourceStartSec: 0, deadlineSec: 10.2, pauseBeforeMs: 0, durationSec: 11.0 }],
+      [1]
+    );
+    expect(rate).not.toBeNull();
+    expect(11.0 / (rate as number)).toBeLessThan(10.2);
+  });
+
+  it("caps the speed-up, so a learner hears brisk rather than rushed", () => {
+    const [rate] = planFit(
+      [{ sourceStartSec: 0, deadlineSec: 5, pauseBeforeMs: 0, durationSec: 10 }],
+      [0.9]
+    );
+    expect(rate).toBeCloseTo(0.9 * MAX_FIT_SPEEDUP, 3);
+  });
+
+  it("counts a refit's expected length forward, not its first take", () => {
+    // Without the carry-forward, s2 would be judged as starting at 11 s and refit too.
+    const rates = planFit(
+      [
+        { sourceStartSec: 0, deadlineSec: 10, pauseBeforeMs: 0, durationSec: 11 },
+        { sourceStartSec: 10, deadlineSec: 20, pauseBeforeMs: 0, durationSec: 9.8 },
+      ],
+      [1, 1]
+    );
+    expect(rates[0]).not.toBeNull();
+    expect(rates[1]).toBeNull();
+  });
+});
+
+describe("parseHasPlayableVideo — which uploads become video jobs", () => {
+  it("accepts real footage in the codecs browsers play", () => {
+    expect(parseHasPlayableVideo("h264,0\n")).toBe(true);
+    expect(parseHasPlayableVideo("hevc,0\n")).toBe(true);
+  });
+
+  it("treats an audio file's cover art as no video", () => {
+    // ffprobe reports an mp3's embedded artwork as a video stream.
+    expect(parseHasPlayableVideo("mjpeg,1\n")).toBe(false);
+    expect(parseHasPlayableVideo("png,1\n")).toBe(false);
+  });
+
+  it("treats a codec browsers cannot play as no video", () => {
+    expect(parseHasPlayableVideo("mpeg2video,0\n")).toBe(false);
+  });
+
+  it("treats no video stream as no video", () => {
+    expect(parseHasPlayableVideo("")).toBe(false);
+  });
+});
+
+describe("silenceWav", () => {
+  it("mirrors the format it is given, so the concat demuxer can copy without re-encoding", () => {
+    const format = { sampleRate: 24000, channels: 1, bitsPerSample: 16 };
+    const wav = silenceWav(0.5, format);
+    expect(readPcmFormat(wav)).toEqual(format);
+    // 0.5 s × 24,000 frames × 2 bytes, after the 44-byte header.
+    expect(wav.length).toBe(44 + 24000);
+    expect(wav.subarray(44).every((byte) => byte === 0)).toBe(true);
   });
 });
 
@@ -191,29 +297,41 @@ describe("escapeConcatPath", () => {
 });
 
 describe("the Synthesis schema", () => {
-  it("requires a measured duration, so an unmeasured segment cannot be stored", () => {
-    const base = {
-      id: "s01",
-      startSec: 0,
-      endSec: 4,
-      voice: "hi-IN-Chirp3-HD-Kore",
-      speakingRate: 1,
-      markupUsed: "<speak>यह</speak>",
-      inputMode: "ssml",
-      billedChars: 20,
-      latencyMs: 1200,
-      pauseBeforeMs: 0,
-      emphasisNotFound: [],
-      emphasisPausedTerm: null,
-      emphasisNotRealized: [],
-    };
+  const legacySegment = {
+    id: "s01",
+    startSec: 0,
+    endSec: 4,
+    voice: "hi-IN-Chirp3-HD-Kore",
+    speakingRate: 1,
+    markupUsed: "<speak>यह</speak>",
+    inputMode: "ssml",
+    billedChars: 20,
+    latencyMs: 1200,
+    measuredDurationSec: 4.2,
+    pauseBeforeMs: 0,
+    emphasisNotFound: [],
+    emphasisPausedTerm: null,
+    emphasisNotRealized: [],
+  };
 
-    expect(
-      SynthesizedSegment.parse({ ...base, measuredDurationSec: 4.2 }).measuredDurationSec
-    ).toBe(4.2);
-    // Zero is not a duration a real synthesis produces; it is the value a
-    // half-written record would carry.
-    expect(() => SynthesizedSegment.parse({ ...base, measuredDurationSec: 0 })).toThrow();
+  it("still parses a job stored before utterances existed", () => {
+    // Every job row is re-parsed on read; a breaking change here would 500 the
+    // job list for anyone with an older job, the public demo included.
+    const parsed = Synthesis.parse({
+      audioUri: "gs://b/jobs/x/output.mp3",
+      durationSec: 70,
+      voice: "hi-IN-Chirp3-HD-Kore",
+      segments: [legacySegment],
+      billedChars: 20,
+      measuredCharsPerSec: 12,
+    });
+    expect(parsed.utterances).toBeUndefined();
+  });
+
+  it("rejects a zero duration, the value a half-written record would carry", () => {
+    expect(() =>
+      SynthesizedSegment.parse({ ...legacySegment, measuredDurationSec: 0 })
+    ).toThrow();
   });
 });
 

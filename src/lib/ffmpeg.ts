@@ -393,3 +393,89 @@ export async function encodeMp3(inPath: string, outPath: string): Promise<void> 
     { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
   );
 }
+
+/**
+ * Video codecs current browsers play inside mp4. A video track in anything else
+ * would mux fine and then show a black box, so it is treated as no video.
+ */
+const PLAYABLE_VIDEO_CODECS = new Set(["h264", "hevc", "vp9", "av1"]);
+
+/**
+ * Parses ffprobe's `codec_name,attached_pic` csv rows into "is there a real,
+ * playable picture". Split from the shelling so it is testable.
+ *
+ * An mp3 or m4a with cover art reports its artwork as a video stream (mjpeg or
+ * png with `attached_pic=1`). That is a still image, not footage, and a job
+ * built from it must stay audio-only.
+ */
+export function parseHasPlayableVideo(ffprobeCsv: string): boolean {
+  return ffprobeCsv
+    .split("\n")
+    .map((line) => line.trim().split(","))
+    .some(
+      ([codec = "", attachedPic = "0"]) =>
+        PLAYABLE_VIDEO_CODECS.has(codec) && attachedPic !== "1"
+    );
+}
+
+/** Whether a file carries footage a browser can play. */
+export async function probeHasPlayableVideo(filePath: string): Promise<boolean> {
+  const { stdout } = await run("ffprobe", [
+    "-v",
+    "error",
+    "-select_streams",
+    "v",
+    "-show_entries",
+    "stream=codec_name:stream_disposition=attached_pic",
+    "-of",
+    "csv=p=0",
+    filePath,
+  ]);
+  return parseHasPlayableVideo(stdout);
+}
+
+/**
+ * The source footage with the synthesized audio under it.
+ *
+ * The picture is COPIED, not re-encoded: a two-minute 1080p re-encode on one
+ * Cloud Run vCPU would cost more than the whole synthesis stage, and copying
+ * is lossless. Only the audio is encoded, to AAC, because mp4 players expect it.
+ *
+ * No `-shortest`. Stage 4 fits the audio to the source's length, but when an
+ * utterance hits its speed-up cap the Hindi runs a little long, and cutting it
+ * at the last frame would drop the end of the lesson. The player holds the last
+ * frame instead. `+faststart` puts the index first, so playback and seeking
+ * start before the whole file has downloaded.
+ */
+export async function muxVideoWithAudio(
+  videoPath: string,
+  audioPath: string,
+  outPath: string
+): Promise<void> {
+  await run(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-nostats",
+      "-y",
+      "-i",
+      videoPath,
+      "-i",
+      audioPath,
+      "-map",
+      "0:v:0",
+      "-map",
+      "1:a:0",
+      "-c:v",
+      "copy",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-movflags",
+      "+faststart",
+      outPath,
+    ],
+    { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
+  );
+}

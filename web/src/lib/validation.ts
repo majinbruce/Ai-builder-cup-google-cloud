@@ -83,8 +83,8 @@ export const uploadSchema = z.object({
       return type.startsWith("audio/") || type === "video/mp4";
     }, "Must be an audio file or an mp4 video")
     .refine(
-      (files) => (files[0]?.size ?? 0) <= 25 * 1024 * 1024,
-      "Files must be 25 MB or smaller"
+      (files) => (files[0]?.size ?? 0) <= 100 * 1024 * 1024,
+      "Files must be 100 MB or smaller"
     ),
 });
 export type UploadValues = z.infer<typeof uploadSchema>;
