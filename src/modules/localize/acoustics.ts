@@ -201,8 +201,10 @@ export async function measureAcoustics(audioPath: string): Promise<AcousticEvide
 
 /** Seconds as `M:SS.s`, the format the analyze prompt asks the model to use. */
 export function formatTimestamp(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds - minutes * 60;
+  // Rounded to tenths BEFORE splitting, or 59.97 prints as "0:60.0".
+  const rounded = Number(seconds.toFixed(1));
+  const minutes = Math.floor(rounded / 60);
+  const rest = rounded - minutes * 60;
   return `${minutes}:${rest.toFixed(1).padStart(4, "0")}`;
 }
 

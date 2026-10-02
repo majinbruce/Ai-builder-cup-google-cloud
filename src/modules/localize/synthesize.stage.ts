@@ -359,11 +359,10 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
   fs.mkdirSync(utteranceDir, { recursive: true });
 
   const planned = groupIntoUtterances(adaptation.segments, sourceById);
-  const lastSegment = analysis.segments.at(-1) as AnalyzedSegment;
-  const sourceDurationSec = Math.max(
-    input.sourceDurationSec ?? lastSegment.endSec,
-    lastSegment.endSec
-  );
+  // The latest END, not the last segment's: segment order is the model's, and
+  // a shorter last segment would cut the tail off the padded output.
+  const lastEndSec = Math.max(...analysis.segments.map((segment) => segment.endSec));
+  const sourceDurationSec = Math.max(input.sourceDurationSec ?? lastEndSec, lastEndSec);
 
   let done = 0;
   const take = async (

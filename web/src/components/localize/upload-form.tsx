@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -26,8 +26,11 @@ import { cn } from "@/lib/utils";
 import { uploadSchema, type UploadValues } from "@/lib/validation";
 
 const formatSize = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-const formatDuration = (sec: number) =>
-  `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, "0")}`;
+const formatDuration = (sec: number) => {
+  // Rounded BEFORE splitting, or 119.6 s prints as "1:60".
+  const whole = Math.round(sec);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+};
 
 /**
  * The file's duration as the browser decodes it, or null when it cannot (an
@@ -86,13 +89,11 @@ export function UploadForm() {
       return;
     }
     clearErrors("file");
+    setPicked({ file, durationSec: null });
     const durationSec = await probeDuration(file);
-    setPicked({ file, durationSec });
-    if (durationSec !== null && durationSec > MAX_CLIP_SECONDS) {
-      setError("file", {
-        message: `This clip is ${formatDuration(durationSec)} long; the limit is ${MAX_CLIP_SECONDS / 60} minutes. Trim it and try again.`,
-      });
-    }
+    // Only if it is still the picked file: a slow probe of an earlier pick
+    // must not overwrite the newer file's card.
+    setPicked((current) => (current?.file === file ? { file, durationSec } : current));
   };
 
   const field = register("file", {
@@ -113,6 +114,14 @@ export function UploadForm() {
     picked?.durationSec !== null &&
     picked?.durationSec !== undefined &&
     picked.durationSec > MAX_CLIP_SECONDS;
+
+  useEffect(() => {
+    if (tooLong && picked !== null && picked.durationSec !== null) {
+      setError("file", {
+        message: `This clip is ${formatDuration(picked.durationSec)} long; the limit is ${MAX_CLIP_SECONDS / 60} minutes. Trim it and try again.`,
+      });
+    }
+  }, [tooLong, picked, setError]);
 
   const onSubmit = async (values: UploadValues) => {
     const file = values.file[0];

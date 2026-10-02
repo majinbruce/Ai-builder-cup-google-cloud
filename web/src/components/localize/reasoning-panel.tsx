@@ -147,8 +147,8 @@ export function ReasoningPanel({
         </p>
         {checks.length > 0 ? (
           <ul className="mt-2 grid gap-1 text-xs text-muted-foreground">
-            {checks.map((check) => (
-              <li key={check.term}>
+            {checks.map((check, index) => (
+              <li key={`${index}-${check.term}`}>
                 <span className="font-medium text-foreground">{check.term}</span> — model
                 heard: &ldquo;{check.modelEvidence}&rdquo;; ffmpeg measured:{" "}
                 {check.measurement} <VerdictTag verdict={check.verdict} />
@@ -158,8 +158,8 @@ export function ReasoningPanel({
         ) : null}
         {source.idioms.length > 0 ? (
           <ul className="mt-2 grid gap-1 text-xs text-muted-foreground">
-            {source.idioms.map((idiom) => (
-              <li key={idiom.phrase}>
+            {source.idioms.map((idiom, index) => (
+              <li key={`${index}-${idiom.phrase}`}>
                 <span className="font-medium text-foreground">
                   &ldquo;{idiom.phrase}&rdquo;
                 </span>{" "}
@@ -232,7 +232,7 @@ export function ReasoningPanel({
             <div className="mt-3 text-xs text-muted-foreground">
               Glossary terms, fixed for the whole clip:{" "}
               {glossaryUsed.map((entry, index) => (
-                <span key={entry.english} title={entry.why}>
+                <span key={`${index}-${entry.english}`} title={entry.why}>
                   {index > 0 ? ", " : ""}
                   <span className="text-foreground">{entry.english}</span> →{" "}
                   <span lang="hi">{entry.targetForm}</span>
@@ -279,16 +279,16 @@ export function ReasoningPanel({
             <div className="mt-3 text-xs">
               <div className="font-medium">Stiff constructions quoted by the critic</div>
               <ul className="mt-1 grid gap-1" lang="hi">
-                {critique.translationese.map((quote) => (
-                  <li key={quote}>&ldquo;{quote}&rdquo;</li>
+                {critique.translationese.map((quote, index) => (
+                  <li key={`${index}-${quote}`}>&ldquo;{quote}&rdquo;</li>
                 ))}
               </ul>
             </div>
           ) : null}
           {critique.issues.length > 0 ? (
             <ul className="mt-3 list-disc pl-5 text-xs text-muted-foreground">
-              {critique.issues.map((issue) => (
-                <li key={issue}>{issue}</li>
+              {critique.issues.map((issue, index) => (
+                <li key={`${index}-${issue}`}>{issue}</li>
               ))}
             </ul>
           ) : null}

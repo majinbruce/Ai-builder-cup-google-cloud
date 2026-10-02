@@ -2,8 +2,10 @@ import type { ChoiceKind, JobStatus, PedagogicalSignal } from "@/lib/api/schemas
 
 /** Seconds as m:ss.s — segment boundaries are sub-second, so keep a decimal. */
 export function formatTime(sec: number): string {
-  const minutes = Math.floor(sec / 60);
-  const seconds = (sec - minutes * 60).toFixed(1).padStart(4, "0");
+  // Rounded to tenths BEFORE splitting, or 59.97 prints as "0:60.0".
+  const rounded = Number(sec.toFixed(1));
+  const minutes = Math.floor(rounded / 60);
+  const seconds = (rounded - minutes * 60).toFixed(1).padStart(4, "0");
   return `${minutes}:${seconds}`;
 }
 

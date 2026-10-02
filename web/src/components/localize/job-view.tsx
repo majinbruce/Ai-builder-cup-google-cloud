@@ -870,8 +870,11 @@ export function JobView({
                             </tr>
                           </thead>
                           <tbody>
-                            {adaptation.brief.glossary.map((entry) => (
-                              <tr key={entry.english} className="border-t align-top">
+                            {adaptation.brief.glossary.map((entry, index) => (
+                              <tr
+                                key={`${index}-${entry.english}`}
+                                className="border-t align-top"
+                              >
                                 <td className="px-3 py-2 font-medium">{entry.english}</td>
                                 <td className="px-3 py-2 whitespace-nowrap" lang="hi">
                                   {entry.targetForm}

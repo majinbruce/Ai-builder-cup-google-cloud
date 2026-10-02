@@ -212,6 +212,9 @@ describe("prompt formatting", () => {
     expect(formatTimestamp(0)).toBe("0:00.0");
     expect(formatTimestamp(9.46)).toBe("0:09.5");
     expect(formatTimestamp(63.1)).toBe("1:03.1");
+    // Rounding carries into the minute instead of printing "0:60.0".
+    expect(formatTimestamp(59.97)).toBe("1:00.0");
+    expect(formatTimestamp(119.96)).toBe("2:00.0");
   });
 
   it("states that a loud stretch is evidence about volume, not emphasis", () => {

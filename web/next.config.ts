@@ -47,13 +47,18 @@ const nextConfig: NextConfig = {
      * Next buffers each request body for proxy.ts and, past this limit,
      * forwards a TRUNCATED body without failing (see the proxyClientMaxBodySize
      * page in Next's docs). The default is 10 MB; the API accepts uploads up to
-     * MAX_UPLOAD_BYTES (25 MiB) plus multipart framing. Measured 2026-09-11 at
+     * MAX_UPLOAD_BYTES (100 MiB) plus multipart framing. Measured 2026-09-11 at
      * the default: a 26 MiB upload that the API should have refused with 413
      * came back 500, with Next logging "Only the first 10MB will be available".
      * So this sits just above the API's cap, and the API's own 413 is what an
-     * oversized upload gets. `npm run check:demo` pins that.
+     * oversized upload gets.
+     *
+     * In production a browser upload goes straight to GCS on a signed URL and
+     * never passes through here; what does is the local backend's PUT route
+     * (no GCS_BUCKET), where a 40 MB lecture under the old 27 MB limit arrived
+     * cut off and was ingested as a shorter clip or refused as "not audio".
      */
-    proxyClientMaxBodySize: "27mb",
+    proxyClientMaxBodySize: "101mb",
   },
 };
 

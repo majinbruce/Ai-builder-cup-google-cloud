@@ -153,7 +153,10 @@ export function JobList({ jobs }: { jobs: JobSummary[] }) {
                 </div>
                 <div className="grid gap-1 p-3 pr-10">
                   <span className="line-clamp-2 text-sm font-medium">
-                    {job.topic ?? "Working out the topic"}
+                    {job.topic ??
+                      (job.status === "failed"
+                        ? "Untitled video"
+                        : "Working out the topic")}
                   </span>
                   <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     {job.hasVideo ? (
