@@ -2,7 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ffmpegAvailable } from "../src/lib/ffmpeg.ts";
+import {
+  ffmpegAvailable,
+  loudnormFilter,
+  parseLoudnessMeasurement,
+} from "../src/lib/ffmpeg.ts";
 import { audioPart, parseThinkingLevel, THINKING_LEVELS } from "../src/lib/gemini.ts";
 import { loadPrompt } from "../src/lib/prompts.ts";
 
@@ -177,5 +181,51 @@ describe("parseThinkingLevel", () => {
 
   it("rejects an empty value", () => {
     expect(() => parseThinkingLevel(["--thinking="])).toThrow();
+  });
+});
+
+describe("parseLoudnessMeasurement", () => {
+  // The tail of a real `loudnorm=print_format=json` run on the first prod demo.
+  const report = (inputI: string) => `size=N/A time=00:01:03.01 bitrate=N/A speed= 120x
+[Parsed_loudnorm_0 @ 0x5f0c] 
+{
+	"input_i" : "${inputI}",
+	"input_tp" : "-30.79",
+	"input_lra" : "6.40",
+	"input_thresh" : "-55.31",
+	"output_i" : "-16.20",
+	"output_tp" : "-1.50",
+	"output_lra" : "5.10",
+	"output_thresh" : "-26.40",
+	"normalization_type" : "dynamic",
+	"target_offset" : "0.20"
+}
+`;
+
+  it("reads the measured values pass two needs", () => {
+    expect(parseLoudnessMeasurement(report("-45.02"))).toEqual({
+      inputI: -45.02,
+      inputTp: -30.79,
+      inputLra: 6.4,
+      inputThresh: -55.31,
+      targetOffset: 0.2,
+    });
+  });
+
+  it("returns null for silence, which no gain can bring to the target", () => {
+    expect(parseLoudnessMeasurement(report("-inf"))).toBeNull();
+  });
+
+  it("throws when there is no report", () => {
+    expect(() => parseLoudnessMeasurement("Error opening input")).toThrow(/no JSON/);
+  });
+
+  it("feeds the measurement back as a linear second pass", () => {
+    const measured = parseLoudnessMeasurement(report("-45.02"));
+    expect(measured).not.toBeNull();
+    expect(loudnormFilter(measured!)).toBe(
+      "loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=-45.02:measured_TP=-30.79" +
+        ":measured_LRA=6.4:measured_thresh=-55.31:offset=0.2:linear=true"
+    );
   });
 });

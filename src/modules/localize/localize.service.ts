@@ -12,6 +12,7 @@ import {
   measureMeanVolumeDb,
   extractPoster,
   muxVideoWithAudio,
+  normalizeVideoLoudness,
   probeDurationSec,
   probeHasPlayableVideo,
 } from "../../lib/ffmpeg.ts";
@@ -102,6 +103,30 @@ export const defaultStages: Stages = {
  * catches an empty track without second-guessing a quiet speaker.
  */
 const SILENCE_FLOOR_DB = -60;
+
+/**
+ * The upload's video with its audio at the playback level stage 4 gives the
+ * Hindi (PLAYBACK_LOUDNESS in ffmpeg.ts), so switching language does not jump
+ * in volume. Best effort, like the poster: a file loudnorm cannot handle is
+ * stored as uploaded, which plays, only at its own level.
+ */
+async function playableSourceVideo(
+  ctx: Ctx,
+  uploadPath: string,
+  workDir: string
+): Promise<string> {
+  const normalized = path.join(workDir, "source.normalized.mp4");
+  try {
+    await normalizeVideoLoudness(uploadPath, normalized);
+    return normalized;
+  } catch (err) {
+    ctx.log.warn(
+      { err },
+      "could not normalize the video's loudness; storing it as uploaded"
+    );
+    return uploadPath;
+  }
+}
 
 /** A job untouched for this long while in flight belongs to a dead process. */
 export const STALE_JOB_MS = 10 * 60 * 1000;
@@ -224,7 +249,10 @@ export async function createJobFromUpload(
      */
     const hasVideo = await probeHasPlayableVideo(uploadPath).catch(() => false);
     const sourceVideoUri = hasVideo
-      ? await putFile(uploadPath, jobKey(id, "source.mp4"))
+      ? await putFile(
+          await playableSourceVideo(ctx, uploadPath, workDir),
+          jobKey(id, "source.mp4")
+        )
       : undefined;
 
     // The library card's thumbnail. Optional in the same way: a frame that

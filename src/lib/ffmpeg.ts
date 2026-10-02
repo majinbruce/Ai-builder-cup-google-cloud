@@ -361,13 +361,170 @@ export async function concatAudio(inputPaths: string[], outPath: string): Promis
 }
 
 /**
+ * ============================================================================
+ * Playback loudness — the English and the Hindi at the same level.
+ * ============================================================================
+ *
+ * The two players sit side by side and the language switch jumps between them
+ * mid-sentence, so a level gap between them sounds like a bug. Measured on the
+ * first prod demo: the upload (a WhatsApp export, stored byte-identical) was
+ * -45.0 LUFS and the Chirp 3 HD track -21.5 LUFS — 23 dB apart. Both playback
+ * tracks are brought to one target instead: -16 LUFS integrated, the common
+ * level for speech on the web, with a -1.5 dBTP ceiling so the gain never clips.
+ *
+ * Two passes, EBU R128 style: the first measures, the second applies the
+ * measured values with `linear=true`, which is a single static gain whenever
+ * the peak ceiling allows it. Single-pass loudnorm is dynamic — it rides the
+ * gain through the clip, which pumps the noise floor up between sentences, and
+ * that is exactly where a quiet recording has the most noise.
+ */
+export const PLAYBACK_LOUDNESS = { integratedLufs: -16, truePeakDb: -1.5, lra: 11 };
+
+/** The first pass's report: what the clip measured, as loudnorm wants it back. */
+export interface LoudnessMeasurement {
+  inputI: number;
+  inputTp: number;
+  inputLra: number;
+  inputThresh: number;
+  targetOffset: number;
+}
+
+const loudnormTarget = () => {
+  const { integratedLufs, truePeakDb, lra } = PLAYBACK_LOUDNESS;
+  return `loudnorm=I=${integratedLufs}:TP=${truePeakDb}:LRA=${lra}`;
+};
+
+/**
+ * Parses the JSON block `loudnorm=print_format=json` writes at the end of
+ * stderr. Values come as strings (`"input_i" : "-45.02"`), and digital silence
+ * reports `"-inf"`, which comes back as null: there is no gain that makes
+ * silence -16 LUFS, and the caller leaves such a file alone.
+ */
+export function parseLoudnessMeasurement(
+  ffmpegStderr: string
+): LoudnessMeasurement | null {
+  const start = ffmpegStderr.lastIndexOf("{");
+  const end = ffmpegStderr.lastIndexOf("}");
+  if (start === -1 || end < start) {
+    throw new Error(
+      "ffmpeg loudnorm produced no JSON report. Output was:\n" + ffmpegStderr.slice(-500)
+    );
+  }
+
+  const report = JSON.parse(ffmpegStderr.slice(start, end + 1)) as Record<
+    string,
+    unknown
+  >;
+  const read = (key: string) => Number.parseFloat(String(report[key]));
+  const measurement = {
+    inputI: read("input_i"),
+    inputTp: read("input_tp"),
+    inputLra: read("input_lra"),
+    inputThresh: read("input_thresh"),
+    targetOffset: read("target_offset"),
+  };
+
+  return Object.values(measurement).every(Number.isFinite) ? measurement : null;
+}
+
+/** Pass one: the clip's loudness, or null when it is silent. */
+export async function measureLoudness(
+  filePath: string
+): Promise<LoudnessMeasurement | null> {
+  const { stderr } = await run(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-nostats",
+      "-i",
+      filePath,
+      "-vn",
+      "-af",
+      `${loudnormTarget()}:print_format=json`,
+      "-f",
+      "null",
+      "-",
+    ],
+    { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
+  );
+
+  return parseLoudnessMeasurement(stderr);
+}
+
+/** Pass two's filter: the target plus what pass one measured. */
+export function loudnormFilter(m: LoudnessMeasurement): string {
+  return (
+    `${loudnormTarget()}:measured_I=${m.inputI}:measured_TP=${m.inputTp}` +
+    `:measured_LRA=${m.inputLra}:measured_thresh=${m.inputThresh}` +
+    `:offset=${m.targetOffset}:linear=true`
+  );
+}
+
+/**
+ * The uploaded video with its audio at the playback target.
+ *
+ * The picture is copied, as in muxVideoWithAudio, and only the first audio
+ * track is kept and re-encoded. loudnorm resamples to 192 kHz internally, so
+ * the rate is set back to 48 kHz explicitly. A silent track is copied as is.
+ */
+export async function normalizeVideoLoudness(
+  inPath: string,
+  outPath: string
+): Promise<void> {
+  const measured = await measureLoudness(inPath);
+
+  await run(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-nostats",
+      "-y",
+      "-i",
+      inPath,
+      "-map",
+      "0:v:0",
+      "-map",
+      "0:a:0",
+      "-c:v",
+      "copy",
+      ...(measured === null
+        ? ["-c:a", "copy"]
+        : [
+            "-af",
+            loudnormFilter(measured),
+            "-ar",
+            "48000",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+          ]),
+      "-movflags",
+      "+faststart",
+      outPath,
+    ],
+    { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
+  );
+}
+
+/**
  * Encodes to the pipeline's canonical 16 kHz mono MP3.
  *
  * The same format ingest normalizes uploads to (docs/SPEC.md stage 0), so
  * `output.mp3` and `source.mp3` are the same shape and the side-by-side player
  * in Phase 4 has one decoder path rather than two.
+ *
+ * `normalizeLoudness` brings the result to PLAYBACK_LOUDNESS — for stage 4's
+ * Hindi track, which is played. Ingest's analysis copy keeps the recording's
+ * own level: acoustics.ts derives its thresholds from it.
  */
-export async function encodeMp3(inPath: string, outPath: string): Promise<void> {
+export async function encodeMp3(
+  inPath: string,
+  outPath: string,
+  options: { normalizeLoudness?: boolean } = {}
+): Promise<void> {
+  const measured = options.normalizeLoudness ? await measureLoudness(inPath) : null;
+
   await run(
     "ffmpeg",
     [
@@ -380,6 +537,7 @@ export async function encodeMp3(inPath: string, outPath: string): Promise<void> 
       // makes ffmpeg try to map its picture into an mp3 and fail; with it, the
       // same call is both stage 0's ingest normalizer and stage 4's encoder.
       "-vn",
+      ...(measured === null ? [] : ["-af", loudnormFilter(measured)]),
       "-ar",
       "16000",
       "-ac",

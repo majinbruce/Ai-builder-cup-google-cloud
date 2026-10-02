@@ -459,7 +459,7 @@ export async function runSynthesize(input: SynthesizeInput): Promise<SynthesizeO
   const joinedWav = path.join(outDir, "output.wav");
   const outputMp3 = path.join(outDir, "output.mp3");
   await concatAudio(parts, joinedWav);
-  await encodeMp3(joinedWav, outputMp3);
+  await encodeMp3(joinedWav, outputMp3, { normalizeLoudness: true });
   const durationSec = await probeDurationSec(outputMp3);
 
   const utterances: SynthesizedUtterance[] = planned.map((utterance, i) => {
