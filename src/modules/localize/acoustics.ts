@@ -59,6 +59,14 @@ const SAMPLE_RATE = 16_000;
 const PROMINENCE_DB = 3;
 
 /**
+ * A window this far below the clip's mean level is not speech, and is left out
+ * of the median that prominence is measured from. Fixed rather than tied to the
+ * silence threshold: that one moves with the ladder, down to mean-24 on a
+ * clipped speaker, where it stops excluding anything.
+ */
+const SPEECH_FLOOR_OFFSET_DB = 6;
+
+/**
  * Silences shorter than this are the gaps inside normal speech — stop
  * consonants, breath — not pauses a teacher is using to mark something.
  */
@@ -74,12 +82,16 @@ const MIN_PAUSE_SEC = 0.2;
  * absolute finds 0 pauses, while mean-5.6 finds 11 — about one every 5.7 s,
  * which is a believable sentence-boundary density for a lecture.
  *
- * Tried in order, tightest first, stopping at the first threshold that produces
- * a plausible density. Ordering matters: a threshold that is too permissive
- * finds "pauses" mid-word, and once found they cannot be told apart from real
- * ones downstream.
+ * Tried in order, strictest first: a lower threshold calls less of the signal
+ * silent, so each rung finds FEWER pauses than the one before (measured on ten
+ * clips, 2026-10-06). The ladder stops at the first rung with a plausible
+ * density.
+ *
+ * It ran to 16 until the first clips other than the fixture: seven of nine never
+ * reached the band by mean-16 (a speaker who clips every phrase measured 44
+ * pauses a minute there), so it now goes on to 24.
  */
-const THRESHOLD_LADDER_DB = [4, 6, 8, 12, 16];
+const THRESHOLD_LADDER_DB = [4, 6, 8, 12, 16, 20, 24];
 
 /** Plausible pause density for speech: roughly one every 4-10 seconds. */
 const MIN_PAUSES_PER_MINUTE = 6;
@@ -99,7 +111,22 @@ function median(values: number[]): number {
 
 /**
  * Walks the ladder and returns the first threshold with a plausible pause
- * density, or the one that found the most pauses if none qualifies.
+ * density. When no rung lands in the band, it takes the LAST rung still over
+ * it and keeps that rung's longest pauses, up to the top of the band.
+ *
+ * The fallback used to be "whichever rung found the most", which on a clip that
+ * is over the band at every rung is the worst one — 48 pauses a minute on one
+ * test clip, a "pause" every 1.25 s. At that density every segment boundary is
+ * near one and every stressed term is followed by one, so corroborate.ts could
+ * not return anything but "supported".
+ *
+ * Longest, because the beat a teacher leaves before a definition is the long
+ * one and the 0.2 s gap between two phrases is the one to drop. And the rung
+ * over the band rather than the one under it, because density can fall off a
+ * cliff between two rungs (21 a minute to 4, measured): fifteen real pauses
+ * chosen from twenty-one say more than four.
+ *
+ * A clip under the band at every rung keeps the rung that found the most.
  *
  * Exported for the unit tests, which drive it with a canned detector rather
  * than an audio file — the point of the ladder is the decision rule, and that
@@ -110,42 +137,67 @@ export async function chooseSilenceThreshold(
   durationSec: number,
   detect: (thresholdDb: number) => Promise<Silence[]>
 ): Promise<{ thresholdDb: number; offsetDb: number; pauses: Silence[] }> {
+  type Rung = { thresholdDb: number; offsetDb: number; pauses: Silence[] };
   const minutes = durationSec / 60;
-  let best: { thresholdDb: number; offsetDb: number; pauses: Silence[] } | null = null;
+  let lastOver: Rung | null = null;
+  let most: Rung | null = null;
 
   for (const offsetDb of THRESHOLD_LADDER_DB) {
     const thresholdDb = Math.round((meanVolumeDb - offsetDb) * 10) / 10;
     const pauses = await detect(thresholdDb);
     const perMinute = pauses.length / minutes;
-
-    if (best === null || pauses.length > best.pauses.length) {
-      best = { thresholdDb, offsetDb, pauses };
-    }
+    const rung = { thresholdDb, offsetDb, pauses };
 
     if (
       pauses.length >= MIN_PAUSES_ABSOLUTE &&
       perMinute >= MIN_PAUSES_PER_MINUTE &&
       perMinute <= MAX_PAUSES_PER_MINUTE
     ) {
-      return { thresholdDb, offsetDb, pauses };
+      return rung;
     }
+
+    if (perMinute > MAX_PAUSES_PER_MINUTE) lastOver = rung;
+    if (most === null || pauses.length > most.pauses.length) most = rung;
+  }
+
+  if (lastOver !== null) {
+    const cap = Math.max(
+      MIN_PAUSES_ABSOLUTE,
+      Math.floor(MAX_PAUSES_PER_MINUTE * minutes)
+    );
+    const longest = [...lastOver.pauses]
+      .sort((a, b) => b.durationSec - a.durationSec)
+      .slice(0, cap)
+      .sort((a, b) => a.startSec - b.startSec);
+    return { ...lastOver, pauses: longest };
   }
 
   // Unreachable with a non-empty ladder, but the type says it is possible.
-  if (best === null) {
+  if (most === null) {
     throw new Error("The silence threshold ladder is empty.");
   }
 
-  return best;
+  return most;
 }
 
-/** Marks windows at or above the clip median + PROMINENCE_DB. */
-export function markProminence(windows: RmsWindow[]): {
+/**
+ * Marks windows at or above the median SPEECH level + PROMINENCE_DB.
+ *
+ * Windows at or below `speechFloorDb` are left out of the median. Taken over every window, a lecturer who stops to
+ * write on the board drags the median down into their own silence, and then
+ * ordinary speech is "prominent": three of the first nine test clips marked
+ * 29-31% of all windows, against 4% on the fixture.
+ */
+export function markProminence(
+  windows: RmsWindow[],
+  speechFloorDb = -Infinity
+): {
   medianRmsDb: number;
   prominenceThresholdDb: number;
   marked: EnergyWindow[];
 } {
-  const medianRmsDb = median(windows.map((w) => w.rmsDb));
+  const speech = windows.filter((w) => w.rmsDb > speechFloorDb);
+  const medianRmsDb = median((speech.length > 0 ? speech : windows).map((w) => w.rmsDb));
   const prominenceThresholdDb = medianRmsDb + PROMINENCE_DB;
 
   return {
@@ -159,14 +211,6 @@ export function markProminence(windows: RmsWindow[]): {
   };
 }
 
-/**
- * Measures one clip: duration, mean level, pauses, and the energy series.
- *
- * Four ffmpeg passes over a <= 180 s file. That is more decoding than strictly
- * necessary and it is the right trade for a hackathon: one combined filter
- * graph would save a second or two of wall clock and cost the ability to test
- * or reason about either measurement on its own.
- */
 export async function measureAcoustics(audioPath: string): Promise<AcousticEvidence> {
   const [durationSec, meanVolumeDb] = await Promise.all([
     probeDurationSec(audioPath),
@@ -180,7 +224,10 @@ export async function measureAcoustics(audioPath: string): Promise<AcousticEvide
   );
 
   const rawWindows = await measureRmsWindows(audioPath, WINDOW_SEC, SAMPLE_RATE);
-  const { medianRmsDb, prominenceThresholdDb, marked } = markProminence(rawWindows);
+  const { medianRmsDb, prominenceThresholdDb, marked } = markProminence(
+    rawWindows,
+    meanVolumeDb - SPEECH_FLOOR_OFFSET_DB
+  );
 
   return {
     durationSec: Math.round(durationSec * 1000) / 1000,
@@ -229,7 +276,7 @@ export function formatAcousticsForPrompt(evidence: AcousticEvidence): string {
   lines.push("");
   lines.push(
     `Produced by ffmpeg, not by a model. Duration ${evidence.durationSec.toFixed(1)}s, ` +
-      `mean level ${evidence.meanVolumeDb.toFixed(1)} dBFS, median window level ` +
+      `mean level ${evidence.meanVolumeDb.toFixed(1)} dBFS, median speech level ` +
       `${evidence.medianRmsDb.toFixed(1)} dBFS over ${evidence.windowSec}s windows.`
   );
   lines.push("");

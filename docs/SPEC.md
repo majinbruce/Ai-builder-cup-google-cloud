@@ -115,10 +115,16 @@ export const IdiomOrReference = z.object({
   intendedMeaning: z.string(),
   kind: z.enum(["idiom", "cultural_reference", "humor"]),
 });
+export const Speaker = z.object({         // added 2026-10-07
+  id: z.string(),                         // "A", "B", in order of first appearance
+  voice: z.enum(["female", "male", "unknown"]),  // how the voice SOUNDS
+  description: z.string(),                // "the presenter, speaking to camera"
+});
 export const AnalyzedSegment = z.object({
   id: z.string(),                         // "s01"
   startSec: z.number().nonnegative(),
   endSec: z.number().positive(),
+  speaker: z.string().optional(),         // a Speaker.id; one segment, one speaker
   text: z.string(),                       // English transcript
   signal: PedagogicalSignal,
   signalConfidence: z.number().min(0).max(1),
@@ -133,9 +139,40 @@ export const Analysis = z.object({
   sourceLanguage: z.string(),             // "en"
   topic: z.string(),
   audience: z.string(),                   // "beginner developers", inferred
+  speakers: z.array(Speaker).optional(),  // absent on jobs before 2026-10-07
   segments: z.array(AnalyzedSegment).min(1),
 });
 ```
+
+**Speakers (added 2026-10-07; was the NICE "speaker diarization").** Found on a
+clip where a woman presents and a man answers one line: it came back as one
+segment in one male voice, because no stage knew who was speaking. Stage 1 now
+lists every distinct voice and how it sounds, names one per segment, and cuts
+at every change of speaker (which wins over the 4–12 s target). Three things
+read it, through `speakers.ts`: stage 2 writes Hindi whose first-person forms
+agree with the speaker (बताती हूँ / बताता हूँ — the brief, the adapt input and
+the critic's pair all carry it); stage 4 starts a new utterance when the
+speaker changes and casts each speaker a voice of their own kind, different
+from every other speaker's; and a line that is not the teacher's is directed
+as that person, without the teacher's persona. `voice` records what is heard
+and nothing more. A job with no `speakers` behaves exactly as before.
+
+**Anchoring (added 2026-10-07, `anchor.ts`, `docs/research.md` § Cues and
+phrases).** The model's `startSec`/`endSec` are not what later stages read. It
+cuts in the teacher's pauses, as asked, but reports one timestamp somewhere
+inside the silence and gives it to both neighbours — and stage 4 then started
+the Hindi up to 1.5 s before the teacher resumed, while stage 2 budgeted the
+pause as speaking time. After the call, and after corroboration has scored the
+model's own timestamps, each edge that sits in a measured pause (within 0.15 s)
+takes that pause's edge: a segment **ends where the pause starts and the next
+one starts where it ends**. So in the stored `Analysis` a segment is the span
+the teacher is speaking, segments are no longer contiguous, and the gap between
+two is the teacher's measured silence. An edge with no pause near it keeps the
+model's value; an anchor that would leave a span its own words could not be
+said in (six words a second) is refused, and the END of the last segment is
+never anchored: nothing follows it, and its line may use the closing silence.
+What the model said instead is kept in `Corroboration.boundaryAnchors`, and
+`boundariesAligned` is still counted on the model's values.
 
 ### Stage 2 — Adapt (Gemini, text in, JSON out)
 
@@ -261,37 +298,128 @@ export const Critique = z.object({
 });
 ```
 
-### Stage 4 — Synthesize (Cloud Text-to-Speech, Chirp 3 HD, `hi-IN`)
+### Stage 4 — Synthesize (Gemini TTS, directed; Chirp 3 HD as the fallback)
 
-**Reworked 2026-10-01** after listening to the deployed demo — see
-`docs/research.md` § Synthesis rework. The unit of speech is an **utterance**,
-not a segment:
+**Reworked 2026-10-01** after listening to the deployed demo, and **again
+2026-10-06** after listening to nine more clips — see `docs/research.md`
+§ Synthesis rework and § The voice. The unit of speech is an **utterance**, not
+a segment:
 
 - Consecutive segments are grouped until one ends a sentence (`। ? ! .`); a
   segment with `pauseBefore` ≠ none, or the 5,000-byte input cap, starts a new
-  one. One `synthesizeSpeech` call per utterance, **plain text, no tags**: Chirp
-  3 HD speaks each request as a complete utterance, so a mid-sentence boundary or
-  an inline `<break>` gives a sentence-final ending and a restart.
-- `speaking_rate` = the adapter's `ttsHints.speakingRate`s weighted by source
-  span. Confirmed: rate 0.85 lengthens the audio 17.2%.
-- `pauseBefore` becomes 350 / 700 ms of **silence written between calls**, exact.
-- **Timeline fit**: each utterance starts at its source start (never earlier),
-  after the previous one plus its pause. One that would miss the next
-  utterance's start is re-taken once at a faster rate (≤ ×1.15 of requested,
-  ≤ 1.3); the faster take is kept only if it is shorter. The output is padded to
-  the source's length, so the Hindi is as long as the English and in step with
-  the video.
-- Emphasis is **not** realized acoustically. Chirp 3 HD ignores `<prosody>`'s
-  rate (Phase 3), and the one device that survived, an inline `<break>` before a
-  term, turned out to restart the voice. Emphasis terms are highlighted in the
-  reasoning panel and listed under `emphasisNotRealized`.
+  one. One TTS call per utterance — and up to two more for a take that cannot
+  be fitted to its time (Pace, below) — the Hindi as plain text with no tags.
+- **The voice is Gemini TTS** (`TTS_ENGINE=gemini`, `GEMINI_TTS_MODEL`,
+  `GEMINI_TTS_VOICE`), and since 2026-10-07 the model is
+  **`gemini-3.8-flash-tts`** (stable; `gemini-3.1-flash-tts-preview` before).
+  It is given the Hindi as its text and the delivery as ONE short style line
+  built from the pipeline's own artifacts (`buildSpeechStyle`): who is speaking
+  (the opening clause of the brief's `instructorPersona`, or the other speaker
+  as stage 1 described them), the first segment's `register`, the pace (its
+  words are in `src/prompts/pace.v1.md`; a first take is asked for the one
+  `ttsHints.speakingRate` implies), the house phrase in
+  `src/prompts/speak.v2.md`, and the Hindi `emphasisTerms` to lean on. This is where stage 1's reading of the
+  teacher reaches the audio. Short on purpose: Google's guidance for the 3.8
+  models is that long profiles and director's notes cause voice drift, and sent
+  ours the model read them aloud (research, § Gemini 3.8 TTS). The older form —
+  `speak.v1.md` plus full delivery notes, then the passage, as one prompt
+  (`buildSpeechDirection`) — is still built and is what a 3.1 preview model is
+  sent if `GEMINI_TTS_MODEL` names one; `lib/gemini.ts` picks the form from the
+  model. The overall style and the voice are arguments
+  (`SynthesizeInput.style`, `.geminiVoice`), not constants in a prompt.
+- **One voice per speaker (2026-10-07).** `castVoices` gives the first woman
+  heard the first name in `GEMINI_TTS_FEMALE_VOICES` (default `Kore,Aoede`), a
+  second woman the next, and likewise `GEMINI_TTS_MALE_VOICES` (`Charon,Puck`);
+  `GEMINI_TTS_VOICE` is for a voice stage 1 could not place and for older jobs.
+  A voice repeats only when a pool runs out. The Chirp fallback follows the
+  same cast, and `Synthesis.voice` lists every voice that spoke.
+- An utterance the model fails, or returns at a length its
+  text cannot explain, is spoken by the Chirp 3 HD voice of the same name
+  (`hi-IN-Chirp3-HD-<voice>`; the two engines share voices), and the utterance
+  records which `engine` spoke it. `TTS_ENGINE=chirp` runs everything on Chirp.
+- **Pace, and a take recorded again (added 2026-10-07).** The first videos
+  voiced by the 3.8 model showed the teacher's lips moving with nothing to
+  hear. The Hindi was not short (85% of its budget; the rest of the teacher's
+  time was "um" and "right?"); the voice was quick — 8.7 to 17.3 characters a
+  second on single lines, asked for the same "natural" pace — and the re-time
+  below can give a take back a tenth. So every take is **rehearsed** on its own
+  cue (`rehearseTake`): re-timed, its phrases placed against the teacher's
+  measured pauses the way the stage will place them, and what a viewer would
+  be left watching measured. `silentSec` is the seconds the teacher is seen
+  speaking with no Hindi over it, each stretch forgiven 0.4 s because a mouth
+  moving that briefly is a pause (`silentLipsSec`); `lateSec` is how far behind
+  its cue the NEXT line would start. A take that is too short for the teacher
+  (by more than 0.3 s past the grace) or too long (next line over 0.2 s late)
+  is recorded again at another pace from a four-step ladder — `brisk`,
+  `natural`, `unhurried`, `slow` — picked by reading the first take as a
+  measurement of how long THIS passage takes this voice (`retakePace`,
+  `PACE_LENGTH`: ×0.9, ×1, ×1.15, ×1.5, measured). At most three takes of a
+  line (`MAX_TAKES`); the one with the least `2 × lateSec + silentSec` is heard
+  (`chooseTake`). The utterance records its `pace`, the teacher's `speechSec`,
+  and every take when there was more than one — pace, length, `lateSec`,
+  `silentSec`, and which was kept — so no choice of take is unexplained. A
+  pace is a request, not a setting: one "unhurried" take came back shorter
+  than the natural one, which is what the third take is for. Measured on five
+  clips (research, § Pace): lines over while the teacher was still talking
+  17 → 5, visible stretches of silent lips 33 → 21 (34.6 s → 17.7 s), lines
+  behind their cue 3 → 0, for half as many TTS calls again. What is left is
+  mostly the slower voice's own pauses mid-sentence, which went UP (12 → 16).
+- **Timeline fit**: every take is trimmed of leading and trailing silence, so
+  it starts on its cue. Each utterance starts at its source start, never
+  earlier, or a breath (0.12 s) after the previous one if that ran long. One
+  that would miss the next utterance's start is sped up, and one shorter than
+  it should last is slowed, with ffmpeg `atempo` (pitch kept, ×0.9–×1.15),
+  which is exact. How long it "should last" is what its rehearsal found leaves
+  the teacher unheard for least, and it is not simply the teacher's speaking
+  time: a take with a pause of its own where the teacher pauses waits there and
+  needs no slowing at all, while one without has to talk through that pause
+  and is slowed further. No overrun is tolerated: one that would not leave a
+  breath before the next cue is sped up, however small (a 2% allowance used to
+  start the next sentence up to 0.28 s late). The last utterance only has to
+  end with the clip. `pauseBefore` no longer adds silence: the teacher's pause
+  is already in the source timeline. The output is padded to the source's
+  length.
+- **Phrases (added 2026-10-07).** A take with time to spare is no longer one
+  block that then waits. It is cut at its own pauses (≥ 0.25 s under −40 dBFS:
+  where the voice ended a phrase), and a later phrase the Hindi reaches *ahead*
+  of the teacher is held until the teacher's next measured pause ends, so the
+  two start again together (`splitIntoPhrases`, `placePhrases`; the pauses come
+  in as `SynthesizeInput.pauses`). Nothing is stretched or removed and no
+  phrase moves earlier — a pause the voice chose becomes longer — and a hold
+  never costs the next cue. Each held utterance records its `phrases` (start,
+  length, `heldSec`), and then runs to its last phrase's end, past
+  `measuredDurationSec`. Measured on stored takes: the worst stressed term went
+  from 6.0 s ahead of the teacher to 2.8 s; the overall speech/silence overlap
+  barely moves, and cannot — see research.
+- Text too long for the voice to say in its slot is not left to the fit: the
+  retry gate sends it back to adapt with the two numbers (`overLengthBudget`,
+  stage 3). Two numbers, since anchoring. The **budget** is the teacher's
+  speaking time (the segment's own span) and is what the adapter is asked for.
+  The **ceiling** (`charCeiling`) is all that can be said before the next
+  segment's cue with the ×1.15 speed-up spent, and is what it is sent back for
+  missing. (The gate was "30% over" until 2026-10-07: more than stage 4 can
+  absorb, and it let through a line that then ran 0.83 s into the next
+  speaker's cue. The ceiling is deliberately NOT given to the adapter as a hard
+  limit: tried once, it tripled the cost of adapt and stalled a retry —
+  research, § Speakers and voices.)
+- Emphasis **is** directed on the Gemini engine, and not on Chirp, which
+  ignores `<prosody>` (Phase 3). `emphasisNotRealized` lists the terms only for
+  utterances Chirp spoke. Nothing measures whether the stress was performed.
 
 Audio comes back as LINEAR16, not MP3: per-segment MP3s inherit encoder padding
 at every concat boundary, which would corrupt the duration measurements this
 stage exists to produce. Segments are joined with ffmpeg's concat demuxer
-(`-c copy`, lossless — measured within 0.11 s of the sum of its parts) and
-encoded once to 16 kHz mono MP3, the same format ingest normalizes to, stored as
-`jobs/<jobId>/output.mp3`. Full-SSML fallback voice if ever needed:
+(`-c copy`, lossless — measured within 0.11 s of the sum of its parts).
+
+**The master (amended 2026-10-06, `docs/research.md` § Dub audit).** The join
+is brought to the playback level (-16 LUFS) with ONE gain and a peak limiter,
+and kept as a lossless 24 kHz WAV (`SynthesizeOutput.masterFile`). loudnorm's
+`linear=true` was silently running in its dynamic mode on every dub, riding the
+gain 2–3 dB from sentence to sentence. `jobs/<jobId>/output.mp3` is encoded from
+the master at 24 kHz mono, and `output.mp4` is muxed from the master itself, so
+the voice meets one lossy encoder, at its own rate. (It was a 16 kHz MP3
+re-encoded to AAC: nothing above 8 kHz, two lossy passes.) Only ingest's
+analysis copy, `source.mp3`, is 16 kHz. Full-SSML fallback voice if ever needed:
 `hi-IN-Neural2-*`.
 
 ```ts
@@ -587,7 +715,7 @@ Cloud Run job against the same image and env.
 
 ### NICE
 - YouTube URL ingest via yt-dlp. Secondary language (Japanese). Vertex AI
-  instead of AI Studio key. Gemini TTS A/B. Speaker diarization for two-voice clips.
+  instead of AI Studio key. Gemini TTS A/B. ~~Speaker diarization for two-voice clips~~ (built 2026-10-07, stage 1).
 
 ---
 
@@ -617,7 +745,7 @@ Verified against https://aibuildercup.com/Faqs.html and /themes.html on 2026-09-
 - [ ] Team registered with **2–4 members** (builder + designer); solo entries are not eligible.
 - [ ] Theme selected: **Media, Content & Digital Experiences** (there is no Education theme).
 - [ ] All code written after 7 Sept 2026 (fresh-project rule); boilerplate is a starting template, state that in the README.
-- [x] Only Google models used for generation: `gemini-3.8-flash`, Cloud TTS Chirp 3 HD. No other AI APIs in the repo. *(Verified 2026-09-11: no non-Google AI package in either package.json or source.)*
+- [x] Only Google models used for generation: `gemini-3.8-flash`, Gemini TTS (`gemini-3.1-flash-tts-preview`), Cloud TTS Chirp 3 HD. No other AI APIs in the repo. *(Verified 2026-09-11: no non-Google AI package in either package.json or source.)*
 - [x] Deployed on Google Cloud: API and web on **Cloud Run**, files on GCS. Public URL works signed-out for the demo job. *(Verified 2026-09-11: `check-demo.ts` against https://localize-web-13108575259.asia-south1.run.app, all checks passed.)*
 - [ ] Public GitHub repository; `.env.*` and service-account JSON never committed; README has setup, architecture diagram, and the doc citations.
 - [ ] Demo video **under 3 minutes**, shows a real run end-to-end plus the reasoning panel.

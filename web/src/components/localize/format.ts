@@ -1,4 +1,9 @@
-import type { ChoiceKind, JobStatus, PedagogicalSignal } from "@/lib/api/schemas";
+import type {
+  ChoiceKind,
+  JobStatus,
+  PedagogicalSignal,
+  SynthesizedUtterance,
+} from "@/lib/api/schemas";
 
 /** Seconds as m:ss.s — segment boundaries are sub-second, so keep a decimal. */
 export function formatTime(sec: number): string {
@@ -7,6 +12,52 @@ export function formatTime(sec: number): string {
   const minutes = Math.floor(rounded / 60);
   const seconds = (rounded - minutes * 60).toFixed(1).padStart(4, "0");
   return `${minutes}:${seconds}`;
+}
+
+/**
+ * What was done to the kept take to fit it, in a sentence.
+ *
+ * The tempo is read off the two durations rather than `speakingRate`, which
+ * for a Chirp take also carries the rate it was synthesized at.
+ */
+export function describeFit(utterance: SynthesizedUtterance): string {
+  if (!utterance.refit) return "played as it was recorded";
+
+  // Before 2026-10-06 a refit was a second, faster Cloud TTS take.
+  if (utterance.engine === undefined) {
+    return (
+      `first take ${utterance.naturalDurationSec.toFixed(2)} s ran long; re-taken at ` +
+      `rate ${utterance.requestedRate.toFixed(2)} → ${utterance.speakingRate.toFixed(2)}`
+    );
+  }
+
+  const tempo = utterance.naturalDurationSec / utterance.measuredDurationSec;
+  const from = `from ${utterance.naturalDurationSec.toFixed(2)} s`;
+  return tempo > 1
+    ? `sped up ×${tempo.toFixed(2)} ${from}, to end before the next line's cue`
+    : `slowed ×${tempo.toFixed(2)} ${from}, to last while the teacher is speaking`;
+}
+
+/**
+ * Every take of a line that was recorded more than once, with what using each
+ * would have meant and which one is heard; null for a line recorded once.
+ */
+export function describeTakes(utterance: SynthesizedUtterance): string | null {
+  const takes = utterance.takes ?? [];
+  if (takes.length < 2) return null;
+
+  return takes
+    .map((take) => {
+      const left =
+        take.lateSec > 0
+          ? `next line ${take.lateSec.toFixed(1)} s late`
+          : `teacher unheard for ${take.silentSec.toFixed(1)} s`;
+      return (
+        `${take.pace} ${take.durationSec.toFixed(2)} s (${left})` +
+        (take.kept ? " — kept" : "")
+      );
+    })
+    .join("; ");
 }
 
 export const SIGNAL_LABEL: Record<PedagogicalSignal, string> = {

@@ -37,8 +37,12 @@ theme). Deadline 4 Oct 2026.
   `response_format.schema`, and the same schema `.parse()`s the reply and serializes
   the API response. Never hand-write JSON Schema.
 - Speech in: Gemini native audio understanding (inline base64 ≤ 20 MB, else Files
-  API). Speech out: **Cloud Text-to-Speech Chirp 3 HD `hi-IN`** (GA). Gemini TTS
-  models are all Preview → NICE only.
+  API). Speech out: **Gemini TTS** (`gemini-3.8-flash-tts`, stable, since
+  2026-10-07; directed with the pipeline's own register/pace/emphasis — Chirp
+  read flat). It takes the passage as its text and the delivery as a SHORT style
+  line (`buildSpeechStyle`, `speak.v2.md`): sent the old notes-then-passage
+  prompt, it reads the notes aloud. A failed utterance falls back to **Cloud TTS
+  Chirp 3 HD `hi-IN`** (GA) in the same voice; `TTS_ENGINE=chirp` forces that.
 - Storage: GCS bucket for uploads and outputs. Job state in Postgres via the
   existing Drizzle setup — do not add Firestore. Prod Postgres: Cloud SQL on
   credits → else the team's US VPS with `compose.prod.yml` → else Supabase.
@@ -56,13 +60,23 @@ theme). Deadline 4 Oct 2026.
 1. Ingest: audio/video upload (≤ 25 MB, ≤ 180 s) → ffmpeg → 16 kHz mono mp3 in GCS.
 2. Analyze (Gemini, audio in, JSON out): pedagogically segmented transcript with
    signal label (the 7-label enum in SPEC §c), register, pace, emphasis markers,
-   idioms, key terms.
+   idioms, key terms, and who is speaking (`speakers`: one segment, one speaker;
+   each with a `female`/`male` voice, which sets Hindi's first-person grammar in
+   Adapt and the voice each speaker is cast in Synthesize). Segment edges are
+   then anchored to the measured pauses (`anchor.ts`): a segment is the span the
+   teacher is SPEAKING, so segments are not contiguous — the gap between two is
+   the teacher's pause.
 3. Adapt (Gemini, JSON out): Hindi script preserving intent, `literalText` beside it,
    `rationale` + one `why` per non-literal choice, TTS hints per segment.
 4. Critique (Gemini, separate call, blind to the rationale): back-translate, score
    fidelity 0–100; segments < 70 are re-adapted ONCE with the critique attached.
-5. Synthesize: Cloud TTS per segment with `speaking_rate` + `[pause]` markup (+ SSML
-   prosody if the Phase 3 spike confirms Chirp 3 HD honors it), ffmpeg concat.
+5. Synthesize: one directed Gemini TTS call per sentence group, each take trimmed
+   and tempo-fitted (ffmpeg `atempo`, ×0.9–×1.15) to its slot on the source
+   timeline; a take with time to spare is cut at its own pauses and a later
+   phrase held until the teacher starts again; ffmpeg concat. A take that still
+   leaves the teacher speaking unheard, or makes the next line late, is recorded
+   again at another pace (`src/prompts/pace.v1.md`, at most 3 takes a line) and
+   the best fit kept — every take and why is in the job.
 6. Present (`web/`): side-by-side original vs adapted with the reasoning panel — the demo.
 
 ## Project engineering rules (in addition to the boilerplate rules below)

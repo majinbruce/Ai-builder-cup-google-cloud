@@ -40,8 +40,23 @@ import type { AnalyzedSegment, AdaptedSegment } from "./localize.schemas.ts";
  * with no pauses and no rate changes: those are stage 4's deliberate additions
  * and folding them in here would budget the adapter for time the synthesizer
  * spends on purpose. A voice change invalidates it; re-run the baseline.
+ *
+ * RE-MEASURED 2026-10-06 for the voice change that note warned about. Gemini
+ * TTS (gemini-3.1-flash-tts-preview, Charon), directed as a teacher, speaks the
+ * same Hindi more slowly than Chirp 3 HD read it: 10.97 chars/sec over nine
+ * utterances of one clip, against the 12.72 above. Text budgeted at the old
+ * rate ran over its slot in six of those nine, up to 1.8 s behind the picture.
+ * One clip is a thin base; `Synthesis.measuredCharsPerSec` reports the rate on
+ * every job, which is where to read whether this still holds.
+ *
+ * On gemini-3.8-flash-tts (live since 2026-10-07) the natural pace measured
+ * 11.39 over four clips, between 8.7 and 17.3 on single lines. That spread is
+ * why stage 4 no longer leaves the fit to this number alone: a take that comes
+ * back too short or too long for its slot is recorded again at another pace.
+ * And it is why the per-job figure now reads low on a slow lecturer — it
+ * includes takes that were ASKED to be slow.
  */
-export const MEASURED_CHARS_PER_SEC = 12.72;
+export const MEASURED_CHARS_PER_SEC = 10.97;
 
 /**
  * How far over budget a segment may run before it is worth mentioning.
@@ -65,6 +80,35 @@ export function charBudget(
 ): number {
   const spanSec = Math.max(0, segment.endSec - segment.startSec);
   return Math.round((spanSec * MEASURED_CHARS_PER_SEC) / 5) * 5;
+}
+
+/**
+ * How far past the voice's own pace stage 4 will speed an utterance to make it
+ * fit: MAX_FIT_SPEEDUP in synthesize.stage.ts, minus one. A number here rather
+ * than an import because that module imports this one; a unit test holds the
+ * two together.
+ */
+export const FIT_HEADROOM = 0.15;
+
+/**
+ * The most Hindi that can be SAID between a segment's cue and the next one's:
+ * the voice's pace, sped as far as stage 4 will speed it.
+ *
+ * Not a target — charBudget() is the target, and it is smaller, because it
+ * counts only the time the teacher was speaking. This is the wall. Text past it
+ * cannot be fitted by anything downstream: the line ends late, and the next
+ * line starts late with it. Measured 2026-10-07 on the first run with speakers:
+ * 103 characters where 90 fit put a one-line reply 0.83 s behind the man
+ * saying it, and the two lines after it 0.24 s and 0.45 s behind.
+ *
+ * `nextStartSec` defaults to the segment's own end, for the last segment.
+ */
+export function charCeiling(
+  segment: Pick<AnalyzedSegment, "startSec" | "endSec">,
+  nextStartSec: number = segment.endSec
+): number {
+  const slotSec = Math.max(0, Math.max(segment.endSec, nextStartSec) - segment.startSec);
+  return Math.floor(slotSec * MEASURED_CHARS_PER_SEC * (1 + FIT_HEADROOM));
 }
 
 /** One segment's estimated timing against the span it has to fill. */

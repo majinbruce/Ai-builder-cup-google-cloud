@@ -21,6 +21,8 @@ import {
   CHOICE_LABEL,
   SIGNAL_LABEL,
   SIGNAL_TONE,
+  describeFit,
+  describeTakes,
   formatTime,
 } from "@/components/localize/format";
 
@@ -80,6 +82,7 @@ export function ReasoningPanel({
 }) {
   const { source, adapted, critique, synth, utterance, checks, retried } = bundle;
   const [showLiteral, setShowLiteral] = useState(false);
+  const takes = utterance === undefined ? null : describeTakes(utterance);
 
   const sourceMarks: Mark[] = source.emphasis.map((marker) => {
     const check = checks.find((entry) => entry.term === marker.term);
@@ -103,6 +106,11 @@ export function ReasoningPanel({
         title: "Claimed for stress but not in this Hindi text",
         className: "bg-red-200/60 dark:bg-red-500/30",
       };
+    }
+    // Only a voice that takes no direction leaves a term unvoiced (the Chirp
+    // fallback); a directed voice was asked to lean on it.
+    if (synth !== undefined && !synth.emphasisNotRealized.includes(term)) {
+      return { term, title: "Voiced: the voice was asked to lean on this word" };
     }
     return {
       term,
@@ -349,20 +357,31 @@ export function ReasoningPanel({
                   {(utterance.deadlineSec - utterance.sourceStartSec).toFixed(2)} s of
                   source time
                 </dd>
+                {utterance.pace === undefined ? null : (
+                  <>
+                    <dt className="text-muted-foreground">Pace asked for</dt>
+                    <dd className="tabular-nums">
+                      {utterance.pace}
+                      {utterance.speechSec === undefined
+                        ? null
+                        : ` — the teacher speaks for ${utterance.speechSec.toFixed(1)} s here`}
+                    </dd>
+                  </>
+                )}
+                {takes === null ? null : (
+                  <>
+                    <dt className="text-muted-foreground">Takes</dt>
+                    <dd className="tabular-nums">{takes}</dd>
+                  </>
+                )}
                 <dt className="text-muted-foreground">Fit</dt>
-                <dd className="tabular-nums">
-                  {utterance.refit
-                    ? `first take ${utterance.naturalDurationSec.toFixed(2)} s ran long; ` +
-                      `re-taken at rate ${utterance.requestedRate.toFixed(2)} → ` +
-                      `${utterance.speakingRate.toFixed(2)}`
-                    : "fit at the requested rate"}
-                </dd>
+                <dd className="tabular-nums">{describeFit(utterance)}</dd>
               </>
             )}
           </dl>
           <details className="mt-3 text-xs">
             <summary className="cursor-pointer text-muted-foreground">
-              Exactly what was sent to Cloud Text-to-Speech
+              Exactly what the voice was given to say
             </summary>
             <pre
               className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2"

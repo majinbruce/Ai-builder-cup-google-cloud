@@ -28,3 +28,7 @@ fixtures/sample_60s.mp3
 # `npm run stage:analyze`; not committed, because it contains a verbatim
 # transcript of the same third-party clip as sample_60s.mp3 above.
 fixtures/analysis.expected.json
+
+# Third-party YouTube excerpts used only as local test inputs — same rights
+# question as sample_60s.mp3 above. Never commit.
+fixtures/clips/

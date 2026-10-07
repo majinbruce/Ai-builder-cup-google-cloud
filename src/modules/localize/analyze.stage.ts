@@ -1,6 +1,7 @@
 import { audioPart, generateJson, type CallLogger } from "../../lib/gemini.ts";
 import { loadPrompt } from "../../lib/prompts.ts";
 import { formatAcousticsForPrompt, measureAcoustics } from "./acoustics.ts";
+import { anchorSegmentsToPauses } from "./anchor.ts";
 import { corroborate } from "./corroborate.ts";
 import { Analysis } from "./localize.schemas.ts";
 import type { AcousticEvidence, Corroboration, ModelCall } from "./localize.schemas.ts";
@@ -37,12 +38,18 @@ export interface AnalyzeOutput {
 }
 
 /**
- * Measure, analyze, then check the analysis against the measurement.
+ * Measure, analyze, check the analysis against the measurement, then anchor it.
  *
- * The order is the point. The measurements are computed once and used twice —
- * as context the model reasons with, and as the yardstick its claims are held
- * to afterwards. Using different numbers for the two jobs would make the check
+ * The order is the point. The measurements are computed once and used three
+ * times — as context the model reasons with, as the yardstick its claims are
+ * held to afterwards, and last as the edges its segments are moved onto
+ * (anchor.ts). Using different numbers for those jobs would make the check
  * meaningless, so there is exactly one `measureAcoustics` call here.
+ *
+ * The analysis returned is the ANCHORED one: a segment starts when the teacher
+ * starts speaking and ends when they stop, and the pause between two segments
+ * belongs to neither. What the model reported instead is kept in
+ * `corroboration.boundaryAnchors`.
  */
 export async function runAnalyze(input: AnalyzeInput): Promise<AnalyzeOutput> {
   const { audioPath, logger } = input;
@@ -73,7 +80,23 @@ export async function runAnalyze(input: AnalyzeInput): Promise<AnalyzeOutput> {
 
   assertSegmentIds(analysis);
 
-  return { analysis, evidence, corroboration: corroborate(analysis, evidence), call };
+  // Scored on the model's own timestamps, and only then are they corrected: a
+  // boundary-alignment rate counted after anchoring would be the anchoring
+  // grading itself.
+  const corroboration = corroborate(analysis, evidence);
+  const anchored = anchorSegmentsToPauses(analysis.segments, evidence.pauses);
+
+  logger?.debug(
+    { anchored: anchored.anchors.length, segments: analysis.segments.length },
+    "segment edges anchored to measured pauses"
+  );
+
+  return {
+    analysis: { ...analysis, segments: anchored.segments },
+    evidence,
+    corroboration: { ...corroboration, boundaryAnchors: anchored.anchors },
+    call,
+  };
 }
 
 /** Short and path-safe. The prompt asks for `s01`, `s02`, …; this is the floor. */

@@ -79,10 +79,17 @@ function bundle(job: Job): SegmentBundle[] {
       const first = sourceById.get(utterance.segmentIds[0] ?? "");
       const last = sourceById.get(utterance.segmentIds.at(-1) ?? "");
       if (first === undefined || last === undefined) continue;
+      // A take cut into phrases, a later one held for the teacher, runs to its
+      // last phrase's end: longer than the take, and the length to play.
+      const lastPhrase = utterance.phrases?.at(-1);
+      const lengthSec =
+        lastPhrase === undefined
+          ? utterance.measuredDurationSec
+          : lastPhrase.startSec + lastPhrase.durationSec - utterance.outputStartSec;
       for (const id of utterance.segmentIds) {
         windows.set(id, {
           startSec: utterance.outputStartSec,
-          lengthSec: utterance.measuredDurationSec,
+          lengthSec,
           sourceStartSec: first.startSec,
           sourceEndSec: last.endSec,
         });
@@ -140,12 +147,22 @@ function locate(
   track: "source" | "output",
   sec: number
 ): { id: string; sourceSec: number } | null {
-  for (const entry of segments) {
-    const { startSec, endSec } = entry.source;
-    if (track === "source") {
-      if (sec >= startSec && sec < endSec) return { id: entry.source.id, sourceSec: sec };
-      continue;
+  if (track === "source") {
+    // A segment ends where the teacher stops and the next starts where they
+    // start again, so there is a pause between the two. The playhead there
+    // still belongs to the segment just heard, and before the first word to
+    // the first: it must not vanish every time the teacher takes a breath.
+    let index = 0;
+    for (let i = 1; i < segments.length; i += 1) {
+      if (sec >= (segments[i]?.source.startSec ?? Infinity)) index = i;
     }
+    const entry = segments[index];
+    if (entry === undefined) return null;
+    const until = segments[index + 1]?.source.startSec ?? entry.source.endSec;
+    return sec < until ? { id: entry.source.id, sourceSec: sec } : null;
+  }
+
+  for (const entry of segments) {
     const span = entry.output;
     if (span === undefined || span.lengthSec <= 0) continue;
     if (sec >= span.startSec && sec < span.startSec + span.lengthSec) {

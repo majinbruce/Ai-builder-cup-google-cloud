@@ -90,12 +90,17 @@ nothing downstream works without them — but the one claim it makes that could
 not otherwise be checked is the one we built a second, independent measurement
 to check.
 
-**Three things this deliberately does not claim.** First, the granularity is the
-segment, not the word: stage 1 returns 4–12 s spans and nothing gives us the
-timestamp of an individual term, so `supported` means "this span carries
-acoustic evidence consistent with the claim", not "that word was measurably
-louder". Word-level alignment via `gemini-3.5-transcribe` is the documented
-escalation in SPEC §g and is not pretended at. Second, `unsupported` is not the
+**Three things this deliberately does not claim.** First, the granularity is
+about a second around the word, not the word itself: stage 1 gives each stressed
+term a timestamp (`atSec`) and the claim is checked against the energy windows
+and pauses within ±0.75 s of it, so `supported` means "the level rose, or the
+speaker stopped, where the model says the word was". The timestamp is the
+model's own, not a forced alignment; word-level alignment via
+`gemini-3.5-transcribe` is the documented escalation in SPEC §g and is not
+pretended at. (Until 2026-10-06 the check ran over the whole 4–12 s segment,
+and on the first nine clips other than the fixture it could not fail — 54 of 54.
+That is recorded in docs/research.md, along with the 74% it reports now.)
+Second, `unsupported` is not the
 same as wrong — stress is carried by pitch and lengthening as much as by level,
 and this pass measures level and silence, so the rate is a floor on
 corroboration rather than a score for the model. That is exactly why it reports

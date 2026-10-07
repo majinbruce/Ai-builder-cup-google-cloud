@@ -51,8 +51,13 @@ export function LessonMap({
     <div className={cn("grid gap-2", className)}>
       <div className="relative">
         <ol className="flex h-9 gap-0.5" aria-label="Lesson map">
-          {segments.map((segment) => {
+          {segments.map((segment, index) => {
             const width = ((segment.endSec - segment.startSec) / span) * 100;
+            // The teacher's pause before this segment, drawn as the space it
+            // took. Without it every band after a pause sits left of its own
+            // time, and the playhead — placed by time — drifts off the bands.
+            const before = index === 0 ? origin : (segments[index - 1]?.endSec ?? origin);
+            const lead = (Math.max(segment.startSec - before, 0) / span) * 100;
             const label = `${SIGNAL_LABEL[segment.signal]}, ${formatTime(segment.startSec)} to ${formatTime(segment.endSec)}`;
             const active = segment.id === selectedId;
             const band = cn(
@@ -63,7 +68,11 @@ export function LessonMap({
             );
 
             return (
-              <li key={segment.id} style={{ width: `${width}%` }} className="min-w-1">
+              <li
+                key={segment.id}
+                style={{ width: `${width}%`, marginLeft: `${lead}%` }}
+                className="min-w-1"
+              >
                 {onSelect === undefined ? (
                   <span className={band} title={label} />
                 ) : (

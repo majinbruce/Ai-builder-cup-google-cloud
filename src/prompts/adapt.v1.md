@@ -27,6 +27,29 @@ the choice. If it needs two sentences where the English had one, do that. What
 you must not do is preserve English word order at the cost of Hindi that no one
 would say.
 
+## Who is speaking
+
+When a `speaker` line is given, it says whose words these are and how their
+voice sounds. The Hindi will be spoken in a voice cast to match, so the grammar
+has to match too — and Hindi, unlike English, marks the speaker.
+
+- **First person agrees with the speaker.** A woman says "मैं बताती हूँ",
+  "मैं समझ गई", "मुझे लगा था कि मैं कर लूँगी"; a man says "बताता हूँ", "समझ गया",
+  "कर लूँगा". Getting this wrong is audible in the first second: a woman's voice
+  saying "मैं बताता हूँ". When the voice is not identified, prefer a construction
+  that does not mark gender ("हम देखेंगे", "आइए देखते हैं").
+- **Address agrees with who is spoken to.** If the line is said to a named
+  person or to the previous speaker, the verb agrees with THEM: "लू, क्या लिख
+  रहे हो?" to a man, "क्या लिख रही हो?" to a woman.
+- **A different person is a different voice.** When the note says the line
+  before was someone else's, this segment is a reply or a new speaker, not a
+  continuation. Do not carry the teacher's register into a student's question,
+  and do not merge it into the teacher's sentence. Keep it as short and as
+  offhand as it was.
+
+This is the one place where matching the speaker is grammar rather than style;
+`registerGuidance` still decides everything about tone.
+
 ## `targetText` — the string that will be spoken
 
 This exact string is sent to a Hindi text-to-speech voice. That imposes rules:
@@ -42,6 +65,22 @@ This exact string is sent to a Hindi text-to-speech voice. That imposes rules:
   however good, breaks exactly the thing it was written to protect.
 - **No markup, no brackets, no stage directions.** Emphasis and pauses are
   carried by `emphasisTerms` and `ttsHints`, not by symbols inside the text.
+- **No verbal debris.** The English you are given is a verbatim transcript, so
+  it carries the speaker's fillers and false starts: "um", "uh", "you know", a
+  stuttered "to to to", a sentence abandoned and restarted. None of that is
+  teaching, and a synthetic voice reading "उम" or "अह" aloud sounds broken, not
+  human. Leave them out and write the sentence the speaker was reaching for.
+  A hesitation that is doing something — a comic beat, a self-correction that
+  changes the meaning ("or, hopefully not") — is content; keep it, as natural
+  Hindi.
+- **Clip edges.** A clip can begin or end mid-sentence. A word fragment at the
+  very start ("...cture.") is dropped, not transliterated. An unfinished
+  sentence at the very end is rendered as far as it carries meaning and then
+  stopped cleanly; a trailing stub with no content of its own ("Because it
+  ma—", "and so horizontal...") is left out. Never invent the missing part, and
+  never end on "..." or a dash: the voice reads this as a finished sentence.
+  `targetText` is never empty — if a segment is nothing but a fragment, render
+  what is intelligible in it.
 
 Aim for the Hinglish-in-Devanagari register the brief describes: the English
 concept as vocabulary, Hindi doing the grammar and the teaching.
@@ -49,7 +88,9 @@ concept as vocabulary, Hindi doing the grammar and the teaching.
 ## `literalText` — the control condition
 
 What a competent but literal, word-order-following translation of this segment
-would have produced. In Devanagari, same rules.
+would have produced. In Devanagari, same rules, including the two about
+fillers and clip edges: the comparison is between two ways of translating what
+was taught, not between a clean sentence and a stutter.
 
 Write this **honestly**. It is not a straw man to make your real answer look
 good, and it is not a second draft of your real answer either. It is what a
@@ -129,15 +170,24 @@ concept, so it must match the glossary keys exactly.
 
 ## The length budget
 
-Each segment is given a target character count derived from how long the
-original speaker took to say it, so the Hindi audio stays roughly in step with
-the source.
+Each segment is given a target character count: how much Hindi the voice can
+say in the time the original speaker took. This is a dub. Your sentence is laid
+over the video at the moment the teacher said theirs, and a sentence that runs
+past its slot does not just end late — it pushes the next one behind the
+picture, and the learner watches the teacher point at something the Hindi has
+not reached yet.
 
-**This budget yields to fidelity, always.** Hindi commonly needs more room than
-English, and a definition that is complete at 30% over budget is a better
-outcome than one trimmed until it no longer defines anything. Treat the number
-as a nudge toward concision — cut padding, not content — and go over it without
-hesitation when the teaching requires it. Never pad a short segment to reach it.
+So write to the budget. Hindi tempts you to be longer than the English; resist
+it. Choose the shorter of two natural phrasings, drop connectives and politeness
+padding that carry nothing ("जैसा कि आप देख सकते हैं", "यह कहना चाहूँगा कि"),
+prefer the short everyday word, and do not restate what the previous segment
+already said.
+
+**The budget still yields to the teaching, and only to the teaching.** A
+definition that needs 20% more room to stay a definition takes it. What must
+never be cut to fit is content: a condition, a step, the term itself. What
+should always be cut to fit is wording. Never pad a short segment to reach the
+number.
 
 ## Consistency with what you have already written
 

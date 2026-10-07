@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ffmpegAvailable,
-  loudnormFilter,
+  loudnessGainFilter,
   parseLoudnessMeasurement,
 } from "../src/lib/ffmpeg.ts";
 import { audioPart, parseThinkingLevel, THINKING_LEVELS } from "../src/lib/gemini.ts";
@@ -206,9 +206,6 @@ describe("parseLoudnessMeasurement", () => {
     expect(parseLoudnessMeasurement(report("-45.02"))).toEqual({
       inputI: -45.02,
       inputTp: -30.79,
-      inputLra: 6.4,
-      inputThresh: -55.31,
-      targetOffset: 0.2,
     });
   });
 
@@ -220,12 +217,25 @@ describe("parseLoudnessMeasurement", () => {
     expect(() => parseLoudnessMeasurement("Error opening input")).toThrow(/no JSON/);
   });
 
-  it("feeds the measurement back as a linear second pass", () => {
+  it("applies one gain when the peak has room for it", () => {
+    // -45.02 LUFS to -16 is +29.02 dB; the -30.79 dBTP peak ends at -1.77.
     const measured = parseLoudnessMeasurement(report("-45.02"));
     expect(measured).not.toBeNull();
-    expect(loudnormFilter(measured!)).toBe(
-      "loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=-45.02:measured_TP=-30.79" +
-        ":measured_LRA=6.4:measured_thresh=-55.31:offset=0.2:linear=true"
+    expect(loudnessGainFilter(measured!)).toBe("volume=29.02dB");
+  });
+
+  it("holds the peak with a limiter instead of riding the gain", () => {
+    // A real Gemini TTS join: -17.96 LUFS peaking at -0.98 dBTP. +1.96 dB would
+    // put the peak at +0.98, which is where loudnorm's linear mode silently
+    // turned dynamic and leveled the delivery out.
+    const filter = loudnessGainFilter({ inputI: -17.96, inputTp: -0.98 });
+    expect(filter).toBe(
+      "volume=1.96dB,alimiter=limit=0.8414:attack=5:release=100:level=false:latency=true"
     );
+    expect(filter).not.toContain("loudnorm");
+  });
+
+  it("turns a loud clip down with no limiter at all", () => {
+    expect(loudnessGainFilter({ inputI: -12, inputTp: -0.5 })).toBe("volume=-4.00dB");
   });
 });

@@ -20,13 +20,15 @@ import type {
  * Two things it is honest about, because overclaiming here would undo the point
  * of building it:
  *
- * 1. **The granularity is the segment, not the word.** Stage 1 returns segment
- *    spans; nothing gives us the timestamp of an individual term. So a claim of
- *    emphasis on "idempotent" is checked against the 4-12 s span containing it.
- *    A supported verdict therefore means "the span carries acoustic evidence
- *    consistent with the claim", not "that word was measurably louder". Word
- *    alignment is the gemini-3.5-transcribe escalation in docs/SPEC.md section
- *    g, and is not pretended at here.
+ * 1. **The granularity is about a second around the word.** Stage 1 gives each
+ *    stressed term an `atSec`, and the claim is checked against the energy
+ *    windows touching that moment and a pause closing it. It was the whole
+ *    4-12 s segment until 2026-10-06, when six new clips scored 54 of 54
+ *    claims supported — a check nothing could fail. The timestamp is the
+ *    model's own, good to roughly half a second, so the window is 1.5 s wide
+ *    and "supported" means "the level rose, or the speaker stopped, where the
+ *    model says the word was" — not forced word alignment. A marker without
+ *    `atSec` (older stored jobs) is still checked against its segment span.
  *
  * 2. **Unsupported does not mean wrong.** Emphasis is realized by pitch,
  *    lengthening and timing as much as by level, and we measure level and
@@ -37,6 +39,9 @@ import type {
 
 /** A measured pause this close after a span counts as that span's pause. */
 const PAUSE_AFTER_TOLERANCE_SEC = 0.4;
+
+/** Half-width of the span checked around a term's `atSec`. */
+const TERM_WINDOW_SEC = 0.75;
 
 /** How near a real pause a segment boundary must land to count as aligned. */
 const BOUNDARY_TOLERANCE_SEC = 0.3;
@@ -57,7 +62,7 @@ export function corroborate(
   for (const segment of analysis.segments) {
     for (const marker of segment.emphasis) {
       emphasisChecks.push(
-        checkMarker(segment.id, segment.startSec, segment.endSec, marker, {
+        checkMarker(segment.id, ...checkedSpan(segment, marker.atSec), marker, {
           prominentRanges,
           pauses: evidence.pauses,
           windowSec: evidence.windowSec,
@@ -109,6 +114,22 @@ export function corroborate(
  * genuinely aligned cuts into a reported "8/18 (44%)". Same alignment, worse
  * number, and the wrong question answered.
  */
+/**
+ * The span a claim is checked against: about a second around the term when the
+ * model timed it inside its own segment, the whole segment otherwise. A
+ * timestamp outside the segment is the model contradicting itself, and is not
+ * trusted over the span it also gave.
+ */
+function checkedSpan(
+  segment: { startSec: number; endSec: number },
+  atSec: number | undefined
+): [startSec: number, endSec: number] {
+  if (atSec === undefined || atSec < segment.startSec || atSec > segment.endSec) {
+    return [segment.startSec, segment.endSec];
+  }
+  return [Math.max(0, atSec - TERM_WINDOW_SEC), atSec + TERM_WINDOW_SEC];
+}
+
 function interiorBoundaries(analysis: Analysis): number[] {
   const cuts = new Set<number>();
 

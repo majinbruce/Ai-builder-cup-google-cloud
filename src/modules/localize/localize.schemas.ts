@@ -120,11 +120,17 @@ export const Pace = z.enum(["slow", "normal", "fast"]);
  * reads against: the model has to say WHY it thinks a term was stressed, in
  * words, and then measurement either backs that up or does not. A bare
  * `{ term, strength }` pair would be an assertion with nothing to check.
+ *
+ * `atSec` is when the term is spoken, which is what lets the check look at the
+ * second around the WORD rather than the whole segment. Optional because jobs
+ * stored before 2026-10-06 do not have it; corroborate.ts falls back to the
+ * segment span for those.
  */
 export const EmphasisMarker = z.object({
   term: z.string(),
   strength: z.enum(["moderate", "strong"]),
   evidence: z.string(),
+  atSec: z.number().nonnegative().optional(),
 });
 
 /**
@@ -141,11 +147,45 @@ export const IdiomOrReference = z.object({
   kind: z.enum(["idiom", "cultural_reference", "humor"]),
 });
 
+/**
+ * How a speaker's voice sounds: what a dub is cast from.
+ *
+ * `unknown` is a real answer — a child, a crowd, a processed voice — and gets
+ * the default voice rather than a guess.
+ */
+export const SpeakerVoice = z.enum(["female", "male", "unknown"]);
+
+/**
+ * One distinct voice in the clip.
+ *
+ * Added 2026-10-07, when a clip with a woman presenting and a man answering
+ * one line came back as a single male voice: nothing in the pipeline knew who
+ * was speaking. Two things hang off this. Stage 4 casts a matching voice per
+ * speaker, a different one for each. And stage 2 needs it for the grammar —
+ * Hindi marks the speaker's gender on first-person verbs (बताती हूँ / बताता हूँ),
+ * so Hindi written without knowing who speaks is wrong in whichever voice.
+ *
+ * It records how the voice SOUNDS, which is all either use needs.
+ */
+export const Speaker = z.object({
+  /** "A", "B", … in order of first appearance. */
+  id: z.string(),
+  voice: SpeakerVoice,
+  /** Who they are in this clip, in a few words: "the presenter, to camera". */
+  description: z.string(),
+});
+
 /** One pedagogically bounded span of the source audio, fully annotated. */
 export const AnalyzedSegment = z.object({
   id: z.string(),
   startSec: z.number().nonnegative(),
   endSec: z.number().positive(),
+  /**
+   * The `Speaker.id` of whoever says this segment; one segment, one speaker.
+   * Optional because jobs analyzed before 2026-10-07 do not have it, and they
+   * are spoken in the default voice as before.
+   */
+  speaker: z.string().optional(),
   text: z.string(),
   signal: PedagogicalSignal,
   signalConfidence: z.number().min(0).max(1),
@@ -162,6 +202,8 @@ export const Analysis = z.object({
   sourceLanguage: z.string(),
   topic: z.string(),
   audience: z.string(),
+  /** Every distinct voice heard. Absent on jobs from before 2026-10-07. */
+  speakers: z.array(Speaker).optional(),
   segments: z.array(AnalyzedSegment).min(1),
 });
 
@@ -235,6 +277,23 @@ export const EmphasisCheck = z.object({
 });
 
 /**
+ * One segment edge moved off the model's timestamp and onto the measured pause
+ * it sat in (anchor.ts).
+ *
+ * The analysis a job stores carries the MEASURED edge, because every later
+ * stage times itself from it. This is the record of what the model said
+ * instead, so that correction is never invisible.
+ */
+export const BoundaryAnchor = z.object({
+  segmentId: z.string(),
+  edge: z.enum(["start", "end"]),
+  /** What stage 1 reported. */
+  modelSec: z.number().nonnegative(),
+  /** The edge of the measured pause: what the stored segment now says. */
+  measuredSec: z.number().nonnegative(),
+});
+
+/**
  * The model's claims scored against the measurements, per run.
  *
  * This never gates a run (see the plan and docs/JUDGE_NOTES.md): a corroboration
@@ -272,6 +331,13 @@ export const Corroboration = z.object({
    */
   boundariesAligned: z.number().int().nonnegative(),
   boundariesTotal: z.number().int().nonnegative(),
+  /**
+   * Every edge anchor.ts moved, with the model's own value beside the measured
+   * one. `boundariesAligned` above is counted on the model's timestamps, BEFORE
+   * this — counted after, it would be 100% by construction. Absent on jobs
+   * analyzed before 2026-10-07, whose segments still carry the model's edges.
+   */
+  boundaryAnchors: z.array(BoundaryAnchor).optional(),
 });
 
 /**
@@ -544,6 +610,16 @@ export const SynthesizedSegment = z.object({
 });
 
 /**
+ * The paces a take can be asked for, briskest first (2026-10-07).
+ *
+ * The words for each are in src/prompts/pace.v1.md and what each does to a
+ * take's length is in synthesize.stage.ts (PACE_LENGTH). Stage 4 picks one
+ * from the time the teacher took over the same words.
+ */
+export const TakePace = z.enum(["brisk", "natural", "unhurried", "slow"]);
+export type TakePace = z.infer<typeof TakePace>;
+
+/**
  * One Cloud TTS call: consecutive segments spoken as a single breath, placed on
  * the source timeline.
  *
@@ -571,21 +647,101 @@ export const SynthesizedUtterance = z.object({
   /** The exact string sent to Cloud TTS. */
   markupUsed: z.string(),
   inputMode: z.enum(["text", "markup", "ssml"]),
+  /**
+   * Which engine spoke it. Absent on jobs synthesized before 2026-10-06, which
+   * were all Chirp 3 HD.
+   */
+  engine: z.enum(["gemini", "chirp"]).optional(),
   /** The adapter's `speakingRate`s, weighted by each segment's source span. */
   requestedRate: z.number(),
-  /** The rate of the take that was kept. Above requestedRate only when refit. */
+  /**
+   * What is heard, relative to the voice's neutral pace: the engine's own rate
+   * (Chirp's `speaking_rate`; 1 for Gemini TTS, which is paced in words) times
+   * the re-time applied when `refit`.
+   */
   speakingRate: z.number(),
-  /** The first take, at requestedRate. Kept so a refit can be judged against it. */
+  /**
+   * The kept take as the voice spoke it, before any re-time. Kept so a refit
+   * can be judged against it.
+   */
   naturalDurationSec: z.number().positive(),
-  /** The take that was kept, ffprobe'd. */
+  /** The kept take as it is placed (re-timed when `refit`), ffprobe'd. */
   measuredDurationSec: z.number().positive(),
-  /** True when a second, faster take was made because the first missed its deadline. */
+  /**
+   * True when the kept take was re-timed with ffmpeg to fit: sped up to make
+   * its deadline, or slowed toward the time the teacher took. (Until
+   * 2026-10-06 this meant a second, faster take; `takes` says that now.)
+   */
   refit: z.boolean(),
+  /**
+   * How long the teacher is speaking between this utterance's cue and the
+   * next: that stretch of the source less every pause measured in it. It is
+   * what the take is asked to last, and slowed toward.
+   *
+   * Absent on jobs from before 2026-10-07, and when stage 4 was given no
+   * measured pauses to work it out from.
+   */
+  speechSec: z.number().nonnegative().optional(),
+  /** The pace the kept take was asked for. Absent on jobs from before 2026-10-07. */
+  pace: TakePace.optional(),
+  /**
+   * Every take recorded, in order, when there was more than one.
+   *
+   * A take that could not be fitted to its time even at the limits of the
+   * re-time — too long to make the next cue, or leaving the teacher speaking
+   * with no Hindi to hear — is recorded again at another pace, up to three
+   * takes in all, and whichever fits best is kept. All are here so the choice
+   * can be checked: which pace each was asked for, how long it came back, what
+   * using it would have looked like, and which one is heard.
+   */
+  takes: z
+    .array(
+      z.object({
+        pace: TakePace,
+        /** As spoken, before any re-time. */
+        durationSec: z.number().positive(),
+        /** How far behind its cue the NEXT line would start, at the fastest re-time. */
+        lateSec: z.number().nonnegative(),
+        /**
+         * How long the teacher would be seen speaking with no Hindi over it,
+         * once this take was re-timed and placed. Every such stretch is given
+         * 0.4 s of grace first: a mouth moving that briefly is a pause.
+         */
+        silentSec: z.number().nonnegative(),
+        kept: z.boolean(),
+      })
+    )
+    .min(2)
+    .optional(),
   /** Silence placed before it for the first segment's `pauseBefore`. */
   pauseBeforeMs: z.number().int().nonnegative(),
   /** Where it starts in output.mp3. */
   outputStartSec: z.number().nonnegative(),
-  /** Both takes, when there were two. */
+  /**
+   * Where each phrase of the take was placed, when it was cut at its own pauses
+   * and a later phrase held until the teacher started again (2026-10-07).
+   *
+   * Absent when the take plays as one piece — which is every utterance on older
+   * jobs, and any take with no time to spare, no pause of its own, or no
+   * teacher's pause to wait for. When present, the utterance occupies the
+   * output from `outputStartSec` to the last phrase's end, which is LONGER than
+   * `measuredDurationSec`: that field is still the take, and `heldSec` is the
+   * difference, reported so a silence in the middle of a sentence is never an
+   * unexplained one.
+   */
+  phrases: z
+    .array(
+      z.object({
+        /** Where the phrase starts in output.mp3. */
+        startSec: z.number().nonnegative(),
+        durationSec: z.number().positive(),
+        /** Silence added before it, beyond the voice's own pause there. */
+        heldSec: z.number().nonnegative(),
+      })
+    )
+    .min(2)
+    .optional(),
+  /** Both takes, when there were two — and likewise the latency below. */
   billedChars: z.number().int().nonnegative(),
   latencyMs: z.number().int().nonnegative(),
 });
@@ -608,6 +764,11 @@ export const Synthesis = z.object({
    * spoken characters over measured duration across every segment of this run,
    * so it is a property of this voice at these rates, reported per run rather
    * than frozen into a constant that a voice change would silently falsify.
+   *
+   * Since 2026-10-07 each take is asked for the pace its teacher took, so on a
+   * slow lecturer this reads low: it is how fast THIS clip's Hindi was spoken,
+   * and the voice's own neutral rate only over utterances whose `pace` is
+   * `natural`.
    */
   measuredCharsPerSec: z.number().positive(),
 });
@@ -757,6 +918,8 @@ export type Register = z.infer<typeof Register>;
 export type Pace = z.infer<typeof Pace>;
 export type EmphasisMarker = z.infer<typeof EmphasisMarker>;
 export type IdiomOrReference = z.infer<typeof IdiomOrReference>;
+export type SpeakerVoice = z.infer<typeof SpeakerVoice>;
+export type Speaker = z.infer<typeof Speaker>;
 export type AnalyzedSegment = z.infer<typeof AnalyzedSegment>;
 export type Analysis = z.infer<typeof Analysis>;
 export type MeasuredPause = z.infer<typeof MeasuredPause>;
@@ -764,4 +927,5 @@ export type EnergyWindow = z.infer<typeof EnergyWindow>;
 export type AcousticEvidence = z.infer<typeof AcousticEvidence>;
 export type EmphasisVerdict = z.infer<typeof EmphasisVerdict>;
 export type EmphasisCheck = z.infer<typeof EmphasisCheck>;
+export type BoundaryAnchor = z.infer<typeof BoundaryAnchor>;
 export type Corroboration = z.infer<typeof Corroboration>;

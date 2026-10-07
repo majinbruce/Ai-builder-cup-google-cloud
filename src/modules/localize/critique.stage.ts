@@ -1,7 +1,8 @@
 import { generateJson, type CallLogger, type ThinkingLevel } from "../../lib/gemini.ts";
 import { loadPrompt } from "../../lib/prompts.ts";
-import { findLatinRuns } from "./drift.ts";
+import { charBudget, charCeiling, countSpokenChars, findLatinRuns } from "./drift.ts";
 import { Critique } from "./localize.schemas.ts";
+import { speakerOf } from "./speakers.ts";
 import type {
   Adaptation,
   AdaptedSegment,
@@ -83,6 +84,13 @@ export interface CritiquePair {
   stressedTerms: string[];
   /** The Hindi, and nothing that came with it. */
   targetText: string;
+  /**
+   * How the speaker's voice sounds, when stage 1 could tell. A fact about the
+   * SOURCE, like the signal — not the adapter's reasoning — and the critic
+   * needs it for one check no score otherwise covers: Hindi first-person verbs
+   * agree with the speaker, and "मैं बताता हूँ" in a woman's voice is wrong.
+   */
+  speakerVoice?: "female" | "male";
 }
 
 export interface CritiqueInput {
@@ -128,12 +136,14 @@ export function buildCritiqueInput(
       );
     }
 
+    const voice = speakerOf(analysis, segment)?.voice;
     pairs.push({
       id: segment.id,
       sourceText: segment.text,
       signal: segment.signal,
       stressedTerms: segment.emphasis.map((marker) => marker.term),
       targetText,
+      ...(voice === "female" || voice === "male" ? { speakerVoice: voice } : {}),
     });
   }
 
@@ -216,7 +226,44 @@ export function assertCritiqueMatchesPairs(
   }
 }
 
-/** Why a segment is being sent back, in the words the UI shows. */
+/** Below this span a budget is a handful of characters and the ratio is noise. */
+const LENGTH_RETRY_MIN_SPAN_SEC = 2;
+
+/**
+ * Whether a segment's Hindi is more than can be said in the time it has, and
+ * by how much. Pure; null when it fits.
+ *
+ * The Hindi is a dub laid on the source timeline, and the critic cannot see
+ * that: it reads text, not time. The time a segment has runs to
+ * `nextStartSec`, the next segment's cue — since 2026-10-07 a segment ends
+ * where the teacher stops (anchor.ts), and the pause after that is room the
+ * Hindi may run into. What cannot be absorbed is text past charCeiling(): the
+ * voice at its pace, sped as far as stage 4 will speed it. Past that the NEXT
+ * line starts late whatever stage 4 does.
+ *
+ * The gate was "30% over the budget" until the first run with speakers, where
+ * it let 103 characters through against a ceiling of 90 — one character under
+ * 30% over the rounded budget — and a reply landed 0.83 s behind the man
+ * giving it. Thirty percent was never what stage 4 could absorb; fifteen is.
+ * `budget` in the result is the slot at the voice's own pace, the number worth
+ * telling the adapter to aim for.
+ */
+export function overLengthBudget(
+  source: Pick<AnalyzedSegment, "startSec" | "endSec">,
+  targetText: string,
+  nextStartSec: number = source.endSec
+): { chars: number; budget: number } | null {
+  const slot = {
+    startSec: source.startSec,
+    endSec: Math.max(source.endSec, nextStartSec),
+  };
+  if (slot.endSec - slot.startSec < LENGTH_RETRY_MIN_SPAN_SEC) return null;
+  const chars = countSpokenChars(targetText);
+  return chars > charCeiling(source, nextStartSec)
+    ? { chars, budget: charBudget(slot) }
+    : null;
+}
+
 export interface RetryReason {
   critique: SegmentCritique;
   reasons: string[];
@@ -241,10 +288,16 @@ export interface RetryReason {
 export function selectForRetry(
   critique: Critique,
   adaptation: Adaptation,
-  alreadyRetried: readonly string[] = []
+  alreadyRetried: readonly string[] = [],
+  analysis?: Analysis
 ): RetryReason[] {
   const retried = new Set(alreadyRetried);
   const targetById = new Map(adaptation.segments.map((segment) => [segment.id, segment]));
+  const sources = analysis?.segments ?? [];
+  const sourceById = new Map(sources.map((segment) => [segment.id, segment]));
+  const nextStartById = new Map(
+    sources.map((segment, index) => [segment.id, sources[index + 1]?.startSec])
+  );
 
   const selected: RetryReason[] = [];
 
@@ -269,6 +322,21 @@ export function selectForRetry(
         `Latin script in the text sent to hi-IN TTS: ${latin
           .map((run) => `"${run.text}"`)
           .join(", ")}`
+      );
+    }
+
+    const source = sourceById.get(scored.id);
+    const over =
+      source === undefined
+        ? null
+        : overLengthBudget(
+            source,
+            targetById.get(scored.id)?.targetText ?? "",
+            nextStartById.get(scored.id)
+          );
+    if (over !== null) {
+      reasons.push(
+        `too long for its slot: ${over.chars} characters where the voice has time for about ${over.budget}`
       );
     }
 
@@ -314,6 +382,9 @@ export function formatPairsForCritique(pairs: CritiquePair[]): string {
 
   for (const pair of pairs) {
     lines.push(`### ${pair.id}`);
+    if (pair.speakerVoice !== undefined) {
+      lines.push(`Spoken by: a ${pair.speakerVoice === "female" ? "woman" : "man"}`);
+    }
     lines.push(`Instructional move the original was performing: ${pair.signal}`);
     lines.push(`English original: "${pair.sourceText}"`);
     lines.push(

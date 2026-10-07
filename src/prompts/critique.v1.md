@@ -51,6 +51,13 @@ would know.
 - **0-49** — the teaching failed. Wrong meaning, a dropped clause carrying the
   actual content, or a rendering that would leave the learner misinformed.
 
+The English is a verbatim transcript and the Hindi is meant to be spoken by a
+voice, so the Hindi deliberately leaves out the speaker's fillers and false
+starts ("um", "you know", a restarted clause) and a word or sentence stub cut
+off by the edge of the clip. That is not a fidelity loss and must not lower the
+score: nothing was being taught there. Dropping a clause that carried content
+is, as always.
+
 A restructured sentence is not a fidelity loss. A shifted register is not a
 fidelity loss either — that is what the second score is for. Only ask what the
 learner ends up understanding.
@@ -81,6 +88,14 @@ Note that **code-mixing is not a defect**. Technical vocabulary carried over
 from English in Devanagari script — "क्लोज़र", "फ़ंक्शन" — is the real register
 of Indian technical instruction and should score well. What scores badly is
 English *syntax* wearing Hindi words. Judge the grammar, not the loanwords.
+
+**Who is speaking.** A segment may carry a line `Spoken by: a woman` or
+`Spoken by: a man`. That is the voice the Hindi will be heard in, and Hindi
+marks the speaker in first-person verbs and adjectives: "मैं बताती हूँ" from a
+woman, "मैं बताता हूँ" from a man. A form that disagrees with the speaker is not
+a matter of style — nobody says it — so it is a naturalness failure: score it
+69 or below, quote the form in `translationese`, and name it in `issues`.
+Fidelity is not affected. When no such line is given, do not guess.
 
 ## `translationese` — quote it, do not describe it
 

@@ -91,10 +91,20 @@ export const modelCallSchema = z.object({
 });
 export type ModelCall = z.infer<typeof modelCallSchema>;
 
+/** Mirrors `Speaker`: one distinct voice in the clip, and how it sounds. */
+export const speakerSchema = z.object({
+  id: z.string(),
+  voice: z.enum(["female", "male", "unknown"]),
+  description: z.string(),
+});
+export type Speaker = z.infer<typeof speakerSchema>;
+
 export const analyzedSegmentSchema = z.object({
   id: z.string(),
   startSec: z.number(),
   endSec: z.number(),
+  /** A `Speaker.id`. Absent on jobs analyzed before 2026-10-07. */
+  speaker: z.string().optional(),
   text: z.string(),
   signal: pedagogicalSignalSchema,
   signalConfidence: z.number(),
@@ -131,6 +141,8 @@ export const analysisSchema = z.object({
   sourceLanguage: z.string(),
   topic: z.string(),
   audience: z.string(),
+  /** Every distinct voice heard. Absent on jobs analyzed before 2026-10-07. */
+  speakers: z.array(speakerSchema).optional(),
   segments: z.array(analyzedSegmentSchema),
 });
 export type Analysis = z.infer<typeof analysisSchema>;
@@ -154,6 +166,21 @@ export const corroborationSchema = z.object({
   notMeasurable: z.number().int(),
   boundariesAligned: z.number().int(),
   boundariesTotal: z.number().int(),
+  /**
+   * Segment edges the API moved off the model's timestamp and onto the measured
+   * pause they sat in. A segment's `startSec`/`endSec` are the measured values;
+   * this is what the model said instead. Absent on jobs from before 2026-10-07.
+   */
+  boundaryAnchors: z
+    .array(
+      z.object({
+        segmentId: z.string(),
+        edge: z.enum(["start", "end"]),
+        modelSec: z.number(),
+        measuredSec: z.number(),
+      })
+    )
+    .optional(),
 });
 export type Corroboration = z.infer<typeof corroborationSchema>;
 
@@ -251,9 +278,13 @@ export const synthesizedSegmentSchema = z.object({
 });
 export type SynthesizedSegment = z.infer<typeof synthesizedSegmentSchema>;
 
+/** Mirrors the API's `TakePace`: the paces a take can be asked for. */
+export const takePaceSchema = z.enum(["brisk", "natural", "unhurried", "slow"]);
+export type TakePace = z.infer<typeof takePaceSchema>;
+
 /**
- * One Cloud TTS call: consecutive segments spoken in one breath, placed on the
- * source timeline. Jobs from before 2026-10-01 have none.
+ * One TTS call (or two, see `takes`): consecutive segments spoken in one
+ * breath, placed on the source timeline. Jobs from before 2026-10-01 have none.
  */
 export const synthesizedUtteranceSchema = z.object({
   index: z.number().int(),
@@ -262,13 +293,52 @@ export const synthesizedUtteranceSchema = z.object({
   deadlineSec: z.number(),
   markupUsed: z.string(),
   inputMode: z.enum(["text", "markup", "ssml"]),
+  /** Which engine spoke it. Absent on jobs from before 2026-10-06 (all Chirp). */
+  engine: z.enum(["gemini", "chirp"]).optional(),
   requestedRate: z.number(),
   speakingRate: z.number(),
   naturalDurationSec: z.number(),
   measuredDurationSec: z.number(),
+  /** True when the kept take was re-timed to fit: sped up, or slowed. */
   refit: z.boolean(),
+  /** How long the teacher is speaking in this utterance's time. Jobs since 2026-10-07. */
+  speechSec: z.number().optional(),
+  /** The pace the kept take was asked for. Jobs since 2026-10-07. */
+  pace: takePaceSchema.optional(),
+  /**
+   * Every take of a line that was recorded more than once (three at most): one
+   * could not be fitted to its time, so another was asked for at a different
+   * pace and the best fit kept. `lateSec` is how far behind its cue the NEXT
+   * line would have started; `silentSec` how long the teacher would have been
+   * seen speaking with no Hindi over it.
+   */
+  takes: z
+    .array(
+      z.object({
+        pace: takePaceSchema,
+        durationSec: z.number(),
+        lateSec: z.number(),
+        silentSec: z.number(),
+        kept: z.boolean(),
+      })
+    )
+    .optional(),
   pauseBeforeMs: z.number().int(),
   outputStartSec: z.number(),
+  /**
+   * Present when the take was cut at its own pauses and a later phrase held
+   * until the teacher started again. The utterance then runs to its last
+   * phrase's end, which is longer than `measuredDurationSec` (the take itself).
+   */
+  phrases: z
+    .array(
+      z.object({
+        startSec: z.number(),
+        durationSec: z.number(),
+        heldSec: z.number(),
+      })
+    )
+    .optional(),
   billedChars: z.number().int(),
   latencyMs: z.number().int(),
 });

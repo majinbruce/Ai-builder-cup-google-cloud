@@ -52,6 +52,23 @@ loadEnvFile({
 const envBoolean = z.enum(["true", "false"]).transform((value) => value === "true");
 
 /**
+ * A comma-separated list of TTS voice names, with at least one in it. An empty
+ * entry ("Kore,,Aoede", or a trailing comma) is dropped rather than becoming a
+ * voice called "".
+ */
+const voiceList = (fallback: string) =>
+  z
+    .string()
+    .default(fallback)
+    .transform((value) =>
+      value
+        .split(",")
+        .map((name) => name.trim())
+        .filter((name) => name !== "")
+    )
+    .refine((names) => names.length > 0, { message: "must name at least one voice" });
+
+/**
  * `z.coerce` is deliberate: every value out of process.env is a string, and
  * without coercion `PORT` would be "3000" and every numeric comparison in the
  * app would be subtly wrong.
@@ -199,6 +216,28 @@ const envSchema = z.object({
   // Cloud TTS voice. Chirp 3 HD is GA for hi-IN; hi-IN-Neural2-* is the
   // full-SSML fallback if the Phase 3 spike shows prosody markup is ignored.
   TTS_VOICE: z.string().min(1).default("hi-IN-Chirp3-HD-Kore"),
+
+  // Which engine speaks the Hindi. `gemini` is Gemini TTS, which takes delivery
+  // direction (register, pace, which words to lean on) and is what the product
+  // uses since 2026-10-06; `chirp` is Cloud TTS Chirp 3 HD, plain text only.
+  // An utterance Gemini TTS fails falls back to the Chirp voice of the same
+  // name, so the two are the same speaker.
+  //
+  // The model is gemini-3.8-flash-tts since 2026-10-07 (stable; the 3.1 preview
+  // before it). Setting the preview's name here still works: lib/gemini.ts
+  // sends each model the request form it takes, and they are not the same form.
+  TTS_ENGINE: z.enum(["gemini", "chirp"]).default("gemini"),
+  GEMINI_TTS_MODEL: z.string().min(1).default("gemini-3.8-flash-tts"),
+  GEMINI_TTS_VOICE: z.string().min(1).default("Charon"),
+
+  // The voices each speaker is cast from, by how stage 1 says their own voice
+  // sounds: the first woman heard gets the first female voice, a second woman
+  // the next, and the same for men. Comma-separated voice names, which Gemini
+  // TTS and Chirp 3 HD share (docs/research.md lists them by gender).
+  // GEMINI_TTS_VOICE above is what a speaker stage 1 could not place gets, and
+  // every job analyzed before speakers existed.
+  GEMINI_TTS_FEMALE_VOICES: voiceList("Kore,Aoede"),
+  GEMINI_TTS_MALE_VOICES: voiceList("Charon,Puck"),
 
   /**
    * 100 MiB: a two-minute 1080p lecture is typically 30-60 MB. Uploads go
@@ -557,6 +596,11 @@ export const config = {
 
   tts: {
     voice: env.TTS_VOICE,
+    engine: env.TTS_ENGINE,
+    geminiModel: env.GEMINI_TTS_MODEL,
+    geminiVoice: env.GEMINI_TTS_VOICE,
+    femaleVoices: env.GEMINI_TTS_FEMALE_VOICES,
+    maleVoices: env.GEMINI_TTS_MALE_VOICES,
   },
 
   limits: {

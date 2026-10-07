@@ -12,7 +12,7 @@ this file, the API changed: tell the user, then update this file.
 | Structured output | `response_format: { type: "text", mime_type: "application/json", schema }`. Read with `interaction.output_text`. Supports enum, nested objects, arrays, anyOf, min/max, required. "Very large or deeply nested schemas may be rejected." Docs pair it with `z.fromJSONSchema`; we go the other way with `z.toJSONSchema(zodSchema)`. | https://ai.google.dev/gemini-api/docs/structured-output |
 | Audio input | 13 formats incl. mp3/wav/m4a/webm. Docs say 32 tokens per second (~1,920/min); **measured 2026-09-07 on a 63.1 s 16 kHz mono mp3: 1,576 audio tokens = ~25/sec**, so budget from the doc figure and expect to come in under it. Usage reports the split explicitly in `input_tokens_by_modality`, which is how a run proves the audio was actually ingested rather than the model answering from the prompt alone. Inline base64 when total request ≤ 20 MB, else Files API (`client.files.upload`). Audio is downsampled to 16 kbps mono. Prompt with `MM:SS` for timestamps. Docs show emotion labelling; **prosody/emphasis detection is not documented** → see risk in SPEC §g. | https://ai.google.dev/gemini-api/docs/audio |
 | Word timestamps fallback | `gemini-3.5-transcribe` (GA): speech-to-text with word-level timestamps, diarization, 85+ languages. | https://ai.google.dev/gemini-api/docs/models |
-| Gemini TTS | `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts` — **all Preview**. Hindi (`hi`) listed. Style via natural-language prompt and audio tags (`[whispers]`, `[excited]`). Output PCM 16-bit 24 kHz base64 in `interaction.output_audio.data`. 32k-token session limit. NICE only. | https://ai.google.dev/gemini-api/docs/speech-generation |
+| Gemini TTS | `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts` — **all Preview**. Hindi (`hi`) listed. Style via natural-language prompt and audio tags (`[whispers]`, `[excited]`). Output PCM 16-bit 24 kHz base64 in `interaction.output_audio.data`. 32k-token session limit. NICE only. **Superseded 2026-10-07: the pipeline speaks with `gemini-3.8-flash-tts` — § Gemini 3.8 TTS.** **The docs changed by 2026-10-06 — READ, NOT MEASURED (no call was spent on it):** the same page and the models page now list **`gemini-3.8-flash-tts`** and **`gemini-3.8-flash-lite-tts`** as *Stable* ("Latest update: September 2026", 8,192 in / 16,384 out, Hindi listed), with `gemini-3.1-flash-tts-preview` — the model this pipeline speaks with — still Preview and named as the one they replace. Their request shape differs from ours: the text goes in as `input: [{type: "user_input", content: [{type: "text", text, annotations: [{type: "speech_metadata", style}]}]}]` with `response_format: {type: "audio"}`; the installed SDK (2.21.0) has no `speech_metadata` in its typings, so it needs an upgrade. Pace is a turn-level `style` ("speaking slowly"/"speaking rapidly") plus inline `<short pause>` / `<long pause>`; there is still no rate or duration parameter. And the page now says of prompts like ours: "Long-form \"Audio Profile\" paragraphs and multi-bullet \"Director's Notes\" carried over from earlier models are the most common cause of voice drift." Whether any of this holds on `hi` is unmeasured; see § Dub audit. | https://ai.google.dev/gemini-api/docs/speech-generation · https://ai.google.dev/gemini-api/docs/models |
 | Pricing | 3.8 Flash paid: $0.75 in / $3.75 out per 1M (promo to 31 Dec 2026). 3.1 Flash TTS: $1 text in / $20 audio out per 1M. Free tier: free. | https://ai.google.dev/gemini-api/docs/pricing |
 | Rate limits | **MEASURED 2026-09-07, twice, and the second measurement is the one that bites. First: `limit: 5` on `generativelanguage.googleapis.com/generate_content_free_tier_requests` — a per-minute cap. Then, during Phase 1, the SAME metric started returning `limit: 20` and kept returning it after 70 s and again after 7 minutes of complete idleness.** A per-minute bucket resets in 60 s, so the binding constraint is not RPM: it is a longer-window free-tier request cap (a daily RPD cap is the obvious reading; the 429 does not name the window, so this file does not claim to know which). Consequence: **the free tier allows roughly twenty `gemini-3.8-flash` requests per day across the whole project**, and one pipeline run is 4–5 of them. That is four runs a day — not enough to iterate a prompt, and not enough to survive a judge and a demo on the same day. Enabling billing (Tier 1) is a hard prerequisite for Phase 1 onward, not a submission-week checklist item. Verbatim: `Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash`. | measured; https://ai.google.dev/gemini-api/docs/rate-limits |
 | Billing / prepay | **MEASURED 2026-09-07 (third observation, and it supersedes the reading above).** After the free-tier 429s, the same key began returning a different 429 with no quota metric at all: `Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects to manage your project and billing.` Reproduced twice, back to back. So the project is on **prepaid** billing with a zero balance, not on the free tier — which means the earlier `limit: 20` free-tier message was the state *before* billing was attached, and the current blocker is a funding one, not a rate one. Prepay does not auto-recharge: the balance is topped up in AI Studio (https://ai.studio/projects), and until it is, **every** Gemini call in this repo fails, including the pre-computed demo job. Check the balance before a demo the way you would check a deploy. **RESOLVED 2026-09-08: the balance was topped up and calls succeed again** — the diagnosis held exactly, and nothing in the code had to change. Cost confirms the top-up is not a recurring worry: a full analyze call on the 63 s fixture is ~4.0k in + ~2.2k out + up to ~20k thinking ≈ **$0.09**, so five Phase-1 iterations cost under fifty cents. Budget by thinking tokens, not by request count. | measured; https://ai.google.dev/gemini-api/docs/billing#prepay |
@@ -69,7 +69,10 @@ const parsed = zodSchema.parse(JSON.parse(interaction.output_text));
   `{ timeout: ms }` as the second argument works and applies **per attempt** —
   measured with `timeout: 1`: `APIConnectionTimeoutError` after 6.7 s total,
   i.e. the four backoff retries ran. `src/lib/gemini.ts` sets 150 s per attempt
-  (`CALL_TIMEOUT_MS`), so a hung call fails its job in at most ~13 min instead
+  (`CALL_TIMEOUT_MS`; **300 s and `maxRetries: 2` since 2026-10-07** — the model
+  was running at ~125 tokens/s and a 17 s clip's analyze took 101 s, so a 60 s
+  clip's could pass 150 s honestly, and each timed-out try is thought again from
+  scratch), so a hung call fails its job in at most ~13 min instead
   of holding it in flight forever (the orphan reaper skips this process's own
   running jobs by design, so nothing else would ever fail it).
 
@@ -264,6 +267,290 @@ Found while building it, recorded because each would otherwise resurface:
 - **A nested Fastify `register(plugin, opts)` re-applies `opts.prefix`.** Passing a
   parent plugin's options through mounted every route at
   `/api/v1/localize/api/v1/localize/*` — found by the first e2e run's 404.
+
+## Nine more clips — measured 2026-10-06
+
+Until this date the pipeline had only ever run on `fixtures/sample_60s.mp3`.
+Nine third-party excerpts (`fixtures/clips/`, gitignored, 17–60 s: accented
+English, dense jargon, two TEDx talks, a Q&A, a flat promo, slow explainers)
+were run through the same stage sequence as `runJob()`.
+
+| Question | Finding | Consequence |
+|---|---|---|
+| Does it run at all on other material? | Yes. Six clips completed before the Gemini spend cap ended the batch (below); the other three completed afterwards. No overlapping or inverted segments, no Latin script reaching TTS, latest Hindi start 1.19 s behind its source | No structural change needed |
+| **Gemini spend cap** | A third billing 429, distinct from the two in the Billing row: `Your project has exceeded its monthly spending cap. Please go to AI Studio at https://ai.studio/spend`. It is a per-project monthly dollar cap set in AI Studio, and prod shares the project (deploy.sh copies the same key to Secret Manager), so a local batch can take the deployed site's uploads down with it. The SDK retries it four times first: one call took 464 s to fail | Check https://ai.studio/spend before a demo, as with the prepay balance |
+| **Corroboration could not fail** | 54 of 54 emphasis claims "supported" on the first six clips. Two causes. (1) The threshold ladder was tuned on the fixture: on 7 of 9 clips no rung reached the 6–15 pauses/min band, and the fallback kept the rung with the MOST pauses — 21–48 a minute. (2) A claim was checked against its whole 4–12 s segment, and at that density every segment contains a pause | Ladder extended to mean−24; the fallback is now the last rung over the band, cut to its longest pauses. Analyze returns `atSec` per stressed term and the check looks at ±0.75 s around it. Prominence is measured from the median of speech windows (above mean−6 dB), not of all windows: three clips had marked 29–31% of windows prominent |
+| Corroboration after the fix | Four clips re-run: **32 of 43 claims supported (74%), 22 by an energy rise**, 11 unsupported; per clip 12/14, 6/10, 10/14, 4/5. The fixture's own measurement is unchanged (mean−6, 9 pauses) | The rate can now move, which is the point of publishing it |
+| Fillers reached the voice | Analyze transcribes verbatim, and adapt carried "um"/"uh" into Hindi as "उम"/"अह", which a TTS voice reads as words | `adapt.v1.md` drops fillers, false starts and clip-edge stubs; `critique.v1.md` is told that is not a fidelity loss (it had scored a dropped false start at 85) |
+| **`low` thinking on adapt — tested, REJECTED** | The lever the Demo budget row left "untested". Same clip, same analysis and brief, three levels: `low` 72 s / 0 thought tokens / naturalness 88 (lowest segment 82); `medium` 172 s / 12.1k / 93 (90); `high` 330 s / 31.9k / 92 (84). At `low` the critic quoted real calques that `medium` did not produce ("या उस मामले में किसी जॉब में" for "or a job for that matter", an idiom stage 1 had flagged), and on the accented clip `low` left Latin script in 5 of 9 segments ("student", "ID"), which cost an 86 s retry round; the same clip at default had none. Default thinking spends what `medium` does (1.6–2.2k per call) | Adapt stays at the model's default. `high` buys nothing. The 120 s target stays missed for live uploads: 215–240 s on a 60 s clip, as in Phase 4 |
+| Wall clock on an idle key | 237 s for a 60 s clip run alone (analyze 31 s, brief 24 s, adapt 156 s for 6 segments, critique 13 s, synthesis 11 s). The first batch's 296–525 s was three clips at once on a key about to hit its cap, and is not a pipeline number | — |
+| Not fixed, known | The critique gate (< 70) did not fire on any of the nine clips at default thinking; lowest fidelity seen was 85. Two speakers in a clip become one voice (**addressed 2026-10-07**, § Speakers and voices). Digits ("250,000", "90%", "बी2बी") go to the hi-IN voice as written and nobody has listened to how they are read | Listen before demoing a clip with numbers in it |
+
+## Dub audit — sync and voice, measured 2026-10-06 with no model calls
+
+The Gemini takes four clips had already been paid for (accented English, dense
+jargon, the flat control, slow-deliberate) were replayed through the real
+`runSynthesize()` with `generateSpeech` swapped for a reader of the stored WAVs
+— the replay reproduces the paid runs' placement to 0.0000 s — so everything
+after the TTS call could be measured before and after a change for free. The
+swap was a `module.registerHooks` resolve hook in a throwaway script, not a
+seam in the stage. The takes are kept in `outputs/dub-audit/takes/`
+(gitignored), with before/after videos beside them. The other five fixture
+clips have no Gemini-voice take on disk: the last batch failed at ingest on a
+moved file, before any call.
+
+| Item | Measured | Consequence |
+|---|---|---|
+| **Loudness was never a static gain** | Pass two of loudnorm reported `normalization_type: dynamic` on 6 of 6 stored dubs. `linear=true` is honoured only if the gain keeps the true peak under the ceiling, and a TTS join peaks at −0.5 to −1.3 dBTP at −16 to −22 LUFS. The gain applied per sentence ranged **+0.7 to +3.8 dB** inside one clip (spread 2.1 / 3.1 / 2.1 dB on three clips); loudness range 7.3 → 5.3 LU | `loudnessGainFilter()`: one `volume` gain, and `alimiter` only when the peak needs it. Same takes after: spread 0.5 / 0.4 / 0.3 dB, range 7.3 → 7.0 LU, still −16.2 LUFS. Also applies to the English video track |
+| **The Hindi shipped at 16 kHz, twice lossy** | `output.mp4` carried AAC 16 kHz at 54–74 kbps, encoded from the 16 kHz MP3. The voice's 9–12 kHz band: −48 dB as synthesized, **−87 dB** as shipped. The English beside it is 48 kHz | A 24 kHz lossless master; mp3 at 24 kHz; mp4 muxed from the master. After: −46 dB. The encode chain adds 0.0 ms either way (cross-correlated) |
+| **An upload whose audio starts late lost the offset** | Synthetic mp4, audio stream starting 0.48 s after the video: a beep at 2.00 s of the picture was at 1.53 s in `source.mp3`, so the whole dub would sit 0.48 s early under the video | `aresample=async=1:first_pts=0` in `encodeMp3`: 2.01 s. On a normal clip the mp3 is sample-identical. None of the nine fixtures has this (0–41 ms) |
+| 2% overrun tolerance | Left from the re-take design. It let the next sentence start up to 2% of a slot late (0.28 s on 14 s) | Removed; the last utterance is exempt from the breath instead |
+| Cues against the teacher's real speech | One stored analysis per clip, all nine: 55 of 57 interior segment starts sit in a measured pause or within 0.12 s of its end. But the model puts the boundary anywhere in the pause: Hindi starts **1.52 s and 1.01 s before the teacher resumes** on the key-term clip (1.8 s dramatic pauses), 0.33–0.61 s early on all six interior cues of one TEDx clip, and 0.51 s before the first word of the brachistochrone clip | **Fixed 2026-10-07** — § Cues and phrases |
+| **Where the dub is out of step: inside the slot** | Teacher talking over a silent dub: **15.1 s of 60** (accented), **13.5 s** (dense jargon), 1.5 s of 17 (flat control); the dub talking over the teacher's pauses: 12.5 / 5.4 / 1.9 s. Each sentence starts on cue, is said in one block, and waits. A lecturer at 63 wpm spreads 13 words over 12.4 s; the Hindi says them in 6.0 s, and names the key term about 5 s before the teacher does (`atSec` 21.7 against a take that ends at 16.8) | Tempo cannot: the ×0.9 slow-down runs on 5 of 8 and 5 of 7 sentences and recovers 2.3 s and 1.1 s. Phrase placement was built 2026-10-07 and fixes the key-term timing, **not** this total — § Cues and phrases says why |
+| Does the voice follow "about N seconds"? | 45 takes: correlation 0.37 between the length asked for and the length spoken; spoken ÷ predicted ranges 0.62–1.26. Two takes of identical text and direction differ by up to 19%. "Slow and deliberate" produced a take at 12.0 chars/s against the 10.97 average | Direction is not a timing control. A second take chosen for length would be (25 audio tokens/s, about half a cent per 10 s), and is untested |
+| The pause before a warning | Teacher paused 0.60 s; adapter asked `long`; the dub left 0.23 s, because the previous sentence may fill its whole slot. On the run budgeted at the old rate every gap was the 0.12 s breath | **Not fixed.** `pauseBefore` could shorten the PREVIOUS utterance's deadline rather than delay the next cue |
+
+## Cues and phrases — built and measured 2026-10-07, again with no model calls
+
+Two changes to where the Hindi lands, both checked on what was already paid
+for: the nine stored analyses (one per fixture clip, now kept with the takes in
+`outputs/dub-audit/takes/`) for the first, and the Gemini takes of four clips
+replayed through `runSynthesize()` for the second.
+Judged by a detector the pipeline does not use (10 ms RMS frames on the source
+audio), so the anchoring is not graded by the list it anchors to.
+
+| Item | Measured | Consequence |
+|---|---|---|
+| **Segment edges anchored to the measured pause** (`anchor.ts`) | 96 of 132 edges moved (the last segment's end is never one of them). Mean distance from a Hindi cue to the teacher's real onset: **0.167 s → 0.048 s** over 66 cues; cues more than 0.25 s early: **16 → 4**. Key-term clip: worst 1.52 s → 0.03 s. Replayed on stored takes, speech/silence agreement 54 → 59% (accented), 69 → 70% (dense jargon), 80 → 80% (flat control), no cue late | Done in `runAnalyze`, after corroboration. The stored analysis carries measured edges; the model's are in `Corroboration.boundaryAnchors` |
+| What it does to the Hindi budget | The teacher's pauses stop counting as speaking time: −1% to −14% per clip (−9% on the key-term clip, −14% on one TEDx talk). The key-term clip's two pause-led segments went 55 → 30 and 55 → 35 characters | The retry gate measures against the slot to the NEXT cue instead, so this buys no extra adapt calls. (**Corrected the same day:** at 30% over the slot it let through text that cannot be said — § Speakers and voices, the paid run. It is now the ceiling, 15% over.) **Unmeasured:** whether Gemini writes to the smaller number. Needs one paid adapt run |
+| The 4 cues still early | (a) ffmpeg `silencedetect` is per-sample, and on one TEDx clip its pauses end up to 0.5 s before the RMS level says speech starts (a breath or a click, most likely; not listened to). (b) The brachistochrone clip opens on 0.51 s of music bed at −39 to −66 dB mean with −28 dB peaks: quiet, and not a "pause" to ffmpeg at all, so there is nothing to anchor the first cue to | Left. Merging pauses 0.1 s apart moved the mean 0.048 → 0.040 s and was not worth a second rule. An RMS-based pause detector in acoustics.ts would fix both; it would also change what stage 1 is shown |
+| Tolerance | 0.15 s, not corroborate's 0.3 s. Every near miss measured was ≤ 0.12 s; at 0.3 s a cut with a word between it and the pause gets moved past the word | A cut in running speech (2 of 57) stays the model's |
+| **Phrases placed against the teacher** (`placePhrases`) | The voice pauses ≥ 0.25 s inside a take 66 times in 45 takes, at −49 dBFS or quieter (median) against −8 to −16 for speech; 27 of 36 checked fall on the Hindi's punctuation. Held on 4 of 27 replayed utterances, by 1.0–4.1 s. Stressed terms (31, teacher's time from `atSec`, Hindi's from the term's place in the text): mean gap **1.08 → 0.89 s**, worst **5.8 → 2.8 s**. "सुपरवाइज़्ड लर्निंग": 6.0 s before the lecturer → 1.8 s. The cuts are sample-identical to the take outside a 5 ms fade and sit at −68 dB or lower | A held phrase starts on the teacher's own onset. What was a block and a wait is a sentence with the lecturer's pause in it |
+| **What phrase placement cannot do** | Teacher talking over a silent dub: 13.8 → 14.0 s (accented), 13.0 → 12.6 s (dense jargon). A brute-force search over every possible hold, scored against the teacher's actual speech, gets the dub's speech-in-silence from 19.7 s to **17.6 s at best** across three clips; `placePhrases` reaches 19.4. The accented speaker pauses 46 times a minute; his Hindi takes have one or two places to cut | The remaining 13–14 s a minute is not a placement problem. It is rhythm (a voice that pauses as often as the teacher) and length (Hindi 3–8 s a minute shorter than the teacher's speech), both of which are TTS- or adapt-side and cost calls to try |
+| The full pause list | The ladder keeps only the 15 longest pauses a minute on a dense clip. Handing `placePhrases` every pause instead changed nothing: the same 4 utterances were held | Not the limit. Left as it is |
+
+## Speakers and voices — built 2026-10-07, NOT yet run against a model
+
+Reported from listening to `control-flat_umault`: a woman on screen, a man's
+voice; two people speaking, one voice. Checked in the frames and the stored
+analysis: she presents to camera and asks "Hey Lou, what you writing?", a man at
+the whiteboard answers "I have no idea." — and stage 1 had put both in one
+segment, with nothing anywhere saying who spoke.
+
+| Item | Verified value | Source |
+|---|---|---|
+| Voice names by gender | **Female:** Achernar, Aoede, Autonoe, Callirrhoe, Despina, Erinome, Gacrux, Kore, Laomedeia, Leda, Pulcherrima, Sulafat, Vindemiatrix, Zephyr. **Male:** Achird, Algenib, Algieba, Alnilam, Charon, Enceladus, Fenrir, Iapetus, Orus, Puck, Rasalgethi, Sadachbia, Sadaltager, Schedar, Umbriel, Zubenelgenubi. The table is Chirp 3 HD's; the pipeline already relies on Gemini TTS sharing these names (its fallback is `hi-IN-Chirp3-HD-<same name>`) | https://docs.cloud.google.com/text-to-speech/docs/chirp3-hd |
+| Can Gemini tell speakers apart from audio? | The audio guide's own transcription prompt asks for it: "Identify distinct speakers (e.g., Speaker 1, Speaker 2)." Nothing documented about reporting how a voice sounds | https://ai.google.dev/gemini-api/docs/audio |
+| Why not measure it instead | Tried: autocorrelation pitch per 0.5 s on this clip reads 190–320 Hz throughout, the man's line included, and 400 Hz where there is only music. A promo with a music bed is exactly where a pitch tracker cannot corroborate the model | measured |
+| Defaults | Female `Kore`, then `Aoede`; male `Charon`, then `Puck`. Kore is the voice the product used on Chirp until 2026-10-06, so it has been listened to in Hindi; Aoede and Puck have not | project choice |
+
+**What is verified:** the casting, the cut at a change of speaker, the direction
+for a line that is not the teacher's and the notes stages 2 and 3 receive — as
+unit tests, and end to end through `runSynthesize()` with stored takes standing
+in for the audio (the two speakers' utterances requested `Kore` and `Charon`).
+**What is not:** whether `gemini-3.8-flash` reports speakers and `voice`
+correctly, whether it honours "one segment, one speaker", whether adapt then
+writes agreeing first-person forms, and how Gemini TTS `Kore` sounds in Hindi.
+Every one of those needs a paid call. The 17 s clip end to end is about $0.20
+by the per-call figures above.
+
+### The paid runs — `control-flat_umault`, 2026-10-07, both approved by Omkar
+
+**Run 1, the whole pipeline:** 8 Gemini calls + 4 TTS calls, **$0.142** by the
+usage each call reported (25,487 in / 4,000 out / 25,357 thinking; TTS 1,953 in
+/ 542 audio tokens). Artifacts and raw takes:
+`outputs/dub-audit/runs/control-flat_umault-speakers/`. **Run 2, stage 2
+onward on run 1's analysis and brief:** below the table.
+
+| Question | Result |
+|---|---|
+| Does stage 1 report the speakers? | Yes: `A` female, "the presenter, addressing the camera"; `B` male, "colleague writing on the whiteboard". Correct against the frames |
+| Does it cut at the change of speaker? | Yes: "I have no idea." is its own segment, 7.14–8.16 s after anchoring, where the earlier run had it inside an 8.5 s segment of hers. 4 segments instead of 3 |
+| Does the brief pick it up? | "A woman presenting directly to camera … her colleague is a deadpan, brief male counterpart acting as a comedic foil" |
+| The cast | Her three utterances were requested in `Kore`, his in `Charon`, all four spoken by Gemini TTS (no Chirp fallback). His line was directed as "not the teacher … colleague writing on the whiteboard" |
+| Hindi grammar | "अरे लू, क्या लिख रहे हो?" (to a man, correct). Nothing in this clip is first person singular, so the agreement rule itself went unexercised. Critic: fidelity 95 ×4, naturalness 92–95, no speaker issue raised |
+| Analyze cost with the longer prompt | 3,100 in / 995 out / **12,139 thinking**, 101 s for a 17 s clip. Slower than the 63 s fixture's 63–84 s; one sample, and thinking varies 10× on identical input (Thinking row) |
+| **What it broke: timing** | Her first line came back at 103 characters for 7.14 s, where 90 can be said with the ×1.15 speed-up spent. It ran 0.83 s into his cue, and the next two lines started 0.24 s and 0.45 s late. Before speakers, her line and his shared one 8.5 s utterance and nothing was late. Finer segments mean more cues to miss |
+| Why the gate missed it | "30% over the budget", measured since yesterday against the slot to the next cue: 104 characters. It passed by one. Thirty percent over was never something stage 4 could absorb | 
+| Fixed after run 1 | The gate is now `charCeiling` — the voice's pace × 1.15 over the slot. It would have sent the 103-character line back |
+| Proper nouns | This run heard "We're Umult" and wrote "उमल्ट" (run 2: "यूमल्ट"); the earlier one heard "Umault" → "यूमॉल्ट". The logo on screen says umault. Stage 1 is audio only |
+
+**Run 2 — and a prompt change that had to be taken back.** For run 2 the adapt
+input also carried `Hard limit: N characters` (the ceiling, stated up front, so
+the first attempt could meet it). Measured against run 1 on the same four
+segments:
+
+| | Run 1 (budget only) | Run 2 (budget + hard limit) |
+|---|---|---|
+| Her first line | 103 characters, ceiling 90 | **84** — under it |
+| Thinking per adapt call | 1,154–1,622 tokens | **2,681–13,241** |
+| Latency per adapt call | 18–23 s | 41–107 s |
+| Adapt cost, four segments | $0.039 | **$0.109** |
+| The line that could not fit (55) | 82, then 65 after its retry | 65 at once, after 13,241 thinking tokens |
+| Its retry | 55.8 s, 6,390 thinking | **stopped by hand after 6.5 minutes without returning** |
+
+The limit works and costs three times as much: the model cannot count
+Devanagari letters, so it deliberates instead, and on a line that cannot fit it
+does not stop. At 150 s a try and four SDK retries, one such call can hold a
+job for 12 minutes; what the abandoned tries billed is not in any number here
+(check https://ai.studio/spend). **The hard-limit line is removed again**; the
+gate at the ceiling stays, because that is arithmetic. A cheaper way to make
+the first pass shorter on fast speakers — a word count rather than a letter
+count, a relative instruction — is untried.
+
+Run 2 was finished with stage 4 alone: three TTS calls ($0.009) plus run 1's
+take for the unchanged line. Counted cost **$0.121**. Result, same clip, same
+voices: her first line ends 0.21 s before his cue (it ran 0.71 s past it); his
+reply is on its cue (was 0.83 s late); three of four lines on cue and the last
+0.21 s late, behind the one line still over its ceiling. Speech/silence
+agreement with the original: 78% → **87%**, against 80% for every
+single-voice version of this clip.
+
+## Gemini 3.8 TTS — tried and adopted 2026-10-07
+
+Omkar asked whether the stable model had been tried and what it cost, then to
+use it. Eight calls on the Umault clip's four lines ($0.029) settled how.
+
+| Item | Verified value | Source |
+|---|---|---|
+| Price | `gemini-3.8-flash-tts`: **$0.50** text in / **$9.00** audio out per 1M tokens through 31 Dec 2026, then $1.00 / $18.00. `gemini-3.8-flash-lite-tts`: $0.50 / $6.00, then $1 / $12. `gemini-3.1-flash-tts-preview`: $1.00 / $20.00. Voice was 9–21% of a job's cost on the preview, so the saving is about two cents a minute of video | https://ai.google.dev/gemini-api/docs/pricing |
+| The request form | `input: [{type: "user_input", content: [{type: "text", text, annotations: [{type: "speech_metadata", style}]}]}]`, `response_format: {type: "audio"}`, `generation_config.speech_config: [{voice, language}]`. Reply `output_audio.data`, `audio/wav`, 24 kHz. **Works on the pinned SDK (2.21.0) at runtime**; its typings have `user_input` but no annotation type, so `lib/gemini.ts` builds the body as a plain object. `language: "hi-IN"` is accepted | measured, 4 + 8 calls |
+| **The old prompt cannot be reused** | Sent what the 3.1 preview is sent — `speak.v1.md`, delivery notes, then the passage, as one text — the 3.8 model **read the notes aloud**: 46.6 s for a 7.7 s line, 29.9 s for 5.9 s, 25.5 s for 3.6 s (ratio 5–7×). Changing `GEMINI_TTS_MODEL` alone would have had every take fail the length check and every line fall back to Chirp, with nothing saying so | measured |
+| The passage with a one-line style | Same lines: 0.98, 0.99, 1.06 of the length their text predicts. 217–264 input tokens a call, 5.7–8.3 s | measured |
+| Through the real stage, a 60 s clip | 8 utterances, all Gemini, all on cue; natural lengths −27% to +14% against the 3.1 takes of the same Hindi (median +6%); voice stage **$0.0148 against $0.0337**, 21 s | measured |
+| Why leave the 3.1 preview | Besides price: on the key-term clip **2 of 7 utterances fell back to Chirp** on the preview (a failed call or a take outside the length bounds; the stage does not say which) | measured |
+
+`PROMPTED_TTS_MODELS` in `lib/gemini.ts` names the previews that take notes in
+the prompt; any other model gets the passage with a style
+(`buildSpeechStyle`, the house phrase in `speak.v2.md`). Nobody has compared
+how the two models SOUND: Omkar chose 3.8 without a listening test, and the
+videos in `outputs/dub-audit/runs/batch-current/` have both
+(`output.mp4` on 3.8, `output-3.1.mp4` on the preview) for when someone does.
+
+## Five clips end to end on the current code — 2026-10-07
+
+Omkar capped the run at five. Speakers, anchoring, phrases, the ceiling gate and
+(after a voice-only redo for three of them) `gemini-3.8-flash-tts`. Artifacts in
+`outputs/dub-audit/runs/batch-current/<clip>/`; `output.mp4` is the 3.8 voice,
+`output-3.1.mp4` the preview's where both exist.
+
+| Clip | Speaker → voice | Lines on cue | Fidelity / naturalness | Cost | Notes |
+|---|---|---|---|---|---|
+| Q&A (Sapolsky) | male → Charon | 8 of 8 | 94 / 91 | $0.199 | One speaker in this excerpt, by the model and by pitch (95–170 Hz throughout); the "Q&A" in the name is the lecture, not the cut |
+| TEDx (Atencio) | **female → Kore** | 6 of 9; last three 0.8–1.0 s late | 97 / 95 | $0.159 | Fast speaker: 4 lines at ×1.15. First person came out feminine ("कोशिश करती"); the brief wrote the rule into its own persona |
+| Key-term (Yale) | male → Charon | 7 of 7 | 95 / 93 | $0.176 | Two phrases held 2.0 s and 2.1 s for the lecturer; 6 of 7 slowed |
+| Dense jargon (CS229) | male → Charon | 6 of 6 | 96 / 94 | $0.171 | One line over its ceiling, retried once: 77 s, 8,954 thinking tokens |
+| Accented English | male → Charon | 8 of 8 | 96 / 93 | $0.154 | — |
+
+- **Cost:** $0.95 for the five ($0.79 model calls, $0.064 voice on 3.8, $0.093
+  for the preview voice on the three clips redone). **$0.15–0.20 per 60 s
+  clip**, not the $0.30–0.45 estimated beforehand. 5–7 minutes each.
+- **Analyze latency:** 42, 69, 87, 140 and 147 s. The last was three seconds
+  under the 150 s timeout in force until that morning.
+- **Pace of the 3.8 voice:** 11.39 chars/s pooled over four clips (10.5–13.7 by
+  clip), against the 10.97 the budget uses. It varies by clip more than by
+  model; the constant is left alone.
+- **Where it is still late:** the TEDx talk, and only on the 3.8 takes — one
+  line came back 9.9 s where the preview gave 8.5 s, and the three after it
+  never caught up. Take-to-take length is the cause, not the pace. A second
+  take when the first cannot fit costs about 0.2 cents on 3.8 and is untried.
+
+## Pace and second takes — built and measured 2026-10-07
+
+Omkar watched the five 3.8-voiced videos and named one fault: "at times when
+the speaker is saying something there is no audio being played". Everything
+below was measured on those videos and their takes. Paid calls: 28, $0.060
+(table at the end); all but the first three approved beforehand.
+
+**The yardstick.** 10 ms RMS frames of the source at the clip's own silence
+threshold and of the dub at its 95th percentile − 30 dB; gaps under 0.2 s
+filled. A *stretch* is the teacher above threshold with the dub below it. A
+stretch of 0.6 s or more is counted as visible.
+
+**What was wrong.**
+
+| Finding | Measured |
+|---|---|
+| Visible stretches, five clips | 33, 34.6 s in all, the longest 2.8 s |
+| …of which the line was over and the teacher still talking | 21 stretches (24.5 s) after 17 of 38 lines |
+| …of which a pause inside the line | 12 |
+| Is the Hindi too short? | No. 85% of its character budget overall. 14 of 38 lines are under 80%, and in each the English is fillers and restarts ("Um, uh, so I don't want to waste too much of my time, uh, to to rush…") that should not be translated |
+| Is the voice too fast? | Yes. Asked for "a natural, lively pace", `gemini-3.8-flash-tts` read at **8.7 to 17.3 chars/s** on single lines (11.39 pooled). A lecturer who took 14.0 s over a sentence was dubbed in 9.34 s |
+| What the re-time could do | ×0.9 at most, already applied to 6 of 7 lines on that clip |
+| Did the phrase holds cause it? | Partly: two holds on the key-term clip left the lecturer talking for 1.2 s and 1.6 s while the Hindi waited. With longer takes the Hindi is less far ahead and the holds shrink |
+
+**The voice does slow down when asked.** Same line, same voice, only the pace
+words in the style line changed; length over the natural take's:
+
+| Pace (words in `pace.v1.md`) | Lines | Mean | Range |
+|---|---|---|---|
+| `brisk` — "quick and light" | 4 | ×0.89 | 0.84–1.01 |
+| `unhurried` — "slow and deliberate" | 7 | ×1.15 | 0.99–1.28 |
+| `slow` — "speaking slowly and unhurried, with a clear pause between phrases" | 11 | ×1.51 | 1.20–1.89 |
+
+- A pace is a request. One 23 s line asked for `unhurried` came back at ×0.99.
+- It is not a multiplier on whatever came before: the two lines whose FIRST
+  take was `unhurried` gained only ×1.06 from `slow`. Lines the voice already
+  reads slowly (about 9 chars/s) do not slow much further.
+- `slow` is slower speech, not just longer pauses: speech time itself was 29%,
+  54% and 61% longer on three lines, pauses 0.5 to 2 s longer in total.
+- "speaking slowly and unhurried" without the pause clause was tried on the
+  same three lines: ×1.34, 1.47, 1.60 and the same pauses (0.76, 0.79, 0.89 s
+  the longest, against 0.84, 0.57, 0.71). Shorter and no better; not adopted.
+
+**What was built** (`synthesize.stage.ts`, § Pace; SPEC stage 4).
+
+- Every take is rehearsed on its cue: re-timed, phrases placed against the
+  measured pauses, and the seconds of silent lips counted with 0.4 s of grace a
+  stretch. A take that is too short or would make the next line late is
+  recorded again at another pace, three takes at most, best fit kept.
+- The re-time now aims at what the rehearsal found, not at 80% of the slot.
+- Tried and dropped: choosing the FIRST take's pace from the character count.
+  In a dry run it asked for `brisk` on lines whose natural take already fitted
+  (the count is off by a quarter or more on one line), and a wrong guess that
+  fits is never corrected. The first take is asked as before and measured.
+- Tried and replaced: judging a take by its length alone. A 7.0 s take for
+  8.3 s of speech passed, and left 2.8 s of silent lips: the lecturer paused,
+  on and off, for 3.4 s in the middle, and the take had no pause of its own to
+  wait at.
+
+**What it did**, same five clips, same Hindi, first takes reused:
+
+| Clip | Visible stretches | Seconds | After a line had ended | Lines late |
+|---|---|---|---|---|
+| Key-term (Yale) | 10 → 7 | 12.5 → 5.5 | 8 → 1 | 0 → 0 |
+| Dense jargon (CS229) | 10 → 9 | 12.0 → 8.4 | 7 → 2 | 0 → 0 |
+| Accented English | 6 → 1 | 5.4 → 1.0 | 4 → 1 | 0 → 0 |
+| Q&A (Sapolsky) | 5 → 3 | 3.4 → 2.1 | 1 → 0 | 0 → 0 |
+| TEDx (Atencio) | 2 → 1 | 1.3 → 0.7 | 1 → 1 | 3 → 0 |
+| **All** | **33 → 21** | **34.6 → 17.7** | **21 → 5** (17 lines → 5) | **3 → 0** |
+
+- Longest stretch 2.8 s → 1.4 s. No Chirp fallback. 38 lines took 57 takes: 15
+  recorded twice, 2 three times. Kept: 21 natural, 14 slow, 2 brisk, 1
+  unhurried. The two-speaker clip's one late line (0.30 s) is on cue as well.
+- **What got worse:** pauses INSIDE a line, 12 → 16. A slow take pauses 0.6 to
+  1.4 s between phrases where the teacher does not. Shortening such a pause
+  where the teacher talks through it is untried; so is a tempo under ×0.9.
+- **What is left after a line ends (5):** three lines where even `slow` is too
+  quick for a teacher speaking that slowly (4.0 s over "All the readings are on
+  the internet"), one cut mid-sentence by the end of the clip, one of 0.7 s.
+- **Cost.** About half as many TTS calls again: roughly $0.009 a minute of
+  video on top of $0.013. A second take took 6 to 14 s; one took 75 s.
+- **Not run:** the prompted (3.1 preview) request form with these paces. It is
+  sent the same words in its notes; nothing has been recorded with it.
+
+| Paid calls | Calls | Cost |
+|---|---|---|
+| Does the voice slow at all? (three lines, before asking — not approved) | 3 | $0.0080 |
+| What `unhurried` and `brisk` do | 6 | $0.0124 |
+| Second takes, five clips | 12 | $0.0213 |
+| Third takes | 2 | $0.0079 |
+| The other `slow` wording | 3 | $0.0074 |
+| Two-speaker clip; one take after the final numbers | 2 | $0.0029 |
+| **Total** | **28** | **$0.0599** |
+
+Every take is kept (`outputs/dub-audit/runs/batch-current/<clip>/`,
+`runs/pace-cal/`), so the stage can be re-run over them for nothing.
 
 ## Cloud Run
 

@@ -38,6 +38,13 @@ lecture at them? Do they use metaphor or stay literal? Are they patient with a
 beginner or brisk with a peer? Do they use humour? Is there a habit of asking a
 question and answering it themselves?
 
+When the analysis lists who speaks, the persona is the one who does most of the
+talking, and it should say so in a way the adapter cannot miss: start with who
+they are ("A woman presenting to camera, …"). Hindi marks the speaker's gender
+in every first-person verb, so this is not colour, it is grammar. If someone
+else has lines — a student, a colleague, an interviewer — add one clause on how
+they sound, so their lines are not written in the teacher's voice.
+
 ## `registerGuidance`
 
 Two or three sentences telling the adapter **how to sound like this person in

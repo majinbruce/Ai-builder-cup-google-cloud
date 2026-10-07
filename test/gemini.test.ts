@@ -23,7 +23,8 @@ vi.mock("../src/config/index.ts", async (importOriginal) => {
   return { config: { ...config, gemini: { ...config.gemini, apiKey: "test-key" } } };
 });
 
-const { generateJson } = await import("../src/lib/gemini.ts");
+const { generateJson, generateSpeech, speechRequestBody, ttsTakesNotesInPrompt } =
+  await import("../src/lib/gemini.ts");
 
 const reply = (text: string) => ({
   id: "i-1",
@@ -46,9 +47,15 @@ describe("generateJson", () => {
       stage: "smoke",
     });
 
-    const [, options] = create.mock.calls[0] as [unknown, { timeout?: number }];
+    const [, options] = create.mock.calls[0] as [
+      unknown,
+      { timeout?: number; maxRetries?: number },
+    ];
     expect(options.timeout).toBeGreaterThan(0);
     expect(Number.isFinite(options.timeout)).toBe(true);
+    // And a bounded number of tries: a timed-out call is re-run from nothing,
+    // so every retry of it buys the same thinking again.
+    expect(options.maxRetries).toBeLessThanOrEqual(2);
   });
 
   it("parses the reply with the schema and reports the call's cost", async () => {
@@ -70,5 +77,72 @@ describe("generateJson", () => {
     await expect(
       generateJson({ schema: z.object({ ok: z.boolean() }), prompt: "p", stage: "smoke" })
     ).rejects.toThrow(/no token usage/);
+  });
+});
+
+describe("the request a TTS model is sent", () => {
+  const request = {
+    text: "कुछ नहीं पता।",
+    style: "colleague writing on the whiteboard. Mood humorous; a natural, lively pace.",
+    prompt: "NOTES (never spoken)\n\n## The passage\n\nकुछ नहीं पता।",
+    voice: "Charon",
+    languageCode: "hi-IN",
+  };
+
+  it("gives a 3.8 model the passage as its text and the delivery as a style", () => {
+    // Sent the notes-and-passage form instead, gemini-3.8-flash-tts read the
+    // notes aloud: 46.6 s of audio for a 7.7 s line.
+    const body = speechRequestBody("gemini-3.8-flash-tts", request);
+    expect(body).toEqual({
+      model: "gemini-3.8-flash-tts",
+      input: [
+        {
+          type: "user_input",
+          content: [
+            {
+              type: "text",
+              text: request.text,
+              annotations: [{ type: "speech_metadata", style: request.style }],
+            },
+          ],
+        },
+      ],
+      response_format: { type: "audio" },
+      generation_config: { speech_config: [{ voice: "Charon", language: "hi-IN" }] },
+    });
+    expect(JSON.stringify(body)).not.toContain("NOTES");
+  });
+
+  it("still prompts the 3.1 preview, the only form it has been run with", () => {
+    const body = speechRequestBody("gemini-3.1-flash-tts-preview", request);
+    expect(body).toEqual({
+      model: "gemini-3.1-flash-tts-preview",
+      input: request.prompt,
+      response_modalities: ["audio"],
+      generation_config: { speech_config: [{ voice: "Charon", language: "hi-IN" }] },
+    });
+  });
+
+  it("treats a model it has never heard of as a current one, not a preview", () => {
+    expect(ttsTakesNotesInPrompt("gemini-3.8-flash-lite-tts")).toBe(false);
+    expect(ttsTakesNotesInPrompt("gemini-3.1-flash-tts-preview")).toBe(true);
+  });
+
+  it("returns a WAV as it came, with the same bounded timeout as every call", async () => {
+    create.mockReset();
+    const wav = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(60)]);
+    create.mockResolvedValue({
+      id: "i-2",
+      status: "completed",
+      output_audio: { data: wav.toString("base64"), mime_type: "audio/wav" },
+      usage: { total_input_tokens: 264, total_output_tokens: 36 },
+    });
+
+    const result = await generateSpeech(request);
+
+    expect(result.audio.equals(wav)).toBe(true);
+    expect(result).toMatchObject({ inputTokens: 264, outputTokens: 36 });
+    const [, options] = create.mock.calls[0] as [unknown, { timeout?: number }];
+    expect(options.timeout).toBeGreaterThan(0);
   });
 });

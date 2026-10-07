@@ -77,7 +77,8 @@ if (dryRun) {
         glossary: [],
       },
       parsed.segments[0] as Analysis["segments"][number],
-      []
+      [],
+      parsed
     )
   );
   out();

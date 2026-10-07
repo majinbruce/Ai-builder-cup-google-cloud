@@ -19,3 +19,7 @@ test/
 web/
 *.log
 *-service-account*.json
+
+# Third-party test clips (see .gitignore): local inputs only, never in the
+# Cloud Build source bucket or the image, which COPYs fixtures/.
+fixtures/clips/

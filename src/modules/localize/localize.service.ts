@@ -525,7 +525,7 @@ export async function runJob(deps: RunDeps, jobId: string): Promise<void> {
 
     let adaptation = adapted.adaptation;
     let retriedIds: string[] = [];
-    const selected = selectForRetry(critique, adaptation);
+    const selected = selectForRetry(critique, adaptation, [], analyzed.analysis);
 
     if (selected.length > 0) {
       log.info(
@@ -558,12 +558,14 @@ export async function runJob(deps: RunDeps, jobId: string): Promise<void> {
     log.info({ elapsedMs: elapsedMs(), retriedIds }, "localize critique done");
 
     /* Stage 4 — synthesize, then store the mp3 -------------------------- */
-    const { synthesis } = await stages.synthesize({
+    const { synthesis, masterFile } = await stages.synthesize({
       analysis: analyzed.analysis,
       adaptation,
       outDir: path.join(workDir, "synth"),
       // The output is padded to the source's full length, trailing silence included.
       sourceDurationSec: analyzed.evidence.durationSec,
+      // Where the teacher paused: a take with time to spare waits there with them.
+      pauses: analyzed.evidence.pauses,
     });
 
     const audioUri = await putFile(synthesis.audioUri, jobKey(jobId, "output.mp3"));
@@ -573,6 +575,9 @@ export async function runJob(deps: RunDeps, jobId: string): Promise<void> {
      * the source timeline, which is what makes a straight mux line up with the
      * slides. A mux failure does NOT fail the job: the audio, the reasoning and
      * the side-by-side players are the product, and the video is a view of them.
+     *
+     * Muxed from the lossless master, so the voice is encoded once, to AAC, at
+     * its own rate — not from the mp3, which would be a second lossy pass.
      */
     let outputVideoUri: string | undefined;
     if (row.sourceVideoUri !== null) {
@@ -580,7 +585,11 @@ export async function runJob(deps: RunDeps, jobId: string): Promise<void> {
         const sourceVideo = path.join(workDir, "source.mp4");
         const outputVideo = path.join(workDir, "output.mp4");
         await downloadFile(row.sourceVideoUri, sourceVideo);
-        await muxVideoWithAudio(sourceVideo, synthesis.audioUri, outputVideo);
+        await muxVideoWithAudio(
+          sourceVideo,
+          masterFile ?? synthesis.audioUri,
+          outputVideo
+        );
         outputVideoUri = await putFile(outputVideo, jobKey(jobId, "output.mp4"));
       } catch (err) {
         log.error({ err }, "localize video mux failed; the job keeps its audio");

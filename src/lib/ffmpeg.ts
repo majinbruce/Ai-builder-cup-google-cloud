@@ -372,21 +372,26 @@ export async function concatAudio(inputPaths: string[], outPath: string): Promis
  * tracks are brought to one target instead: -16 LUFS integrated, the common
  * level for speech on the web, with a -1.5 dBTP ceiling so the gain never clips.
  *
- * Two passes, EBU R128 style: the first measures, the second applies the
- * measured values with `linear=true`, which is a single static gain whenever
- * the peak ceiling allows it. Single-pass loudnorm is dynamic — it rides the
- * gain through the clip, which pumps the noise floor up between sentences, and
- * that is exactly where a quiet recording has the most noise.
+ * Two passes, EBU R128 style: the first measures, the second applies ONE gain
+ * to the whole clip. A gain that rides through the clip pumps the noise floor
+ * up between sentences, which is exactly where a quiet recording has the most
+ * noise, and levels out the stress a voice put on a word.
+ *
+ * Until 2026-10-06 the second pass was loudnorm with `linear=true`, on the
+ * understanding that this is a static gain. It is only a request: when the gain
+ * would lift the true peak over the ceiling, loudnorm reverts to its dynamic
+ * mode and says nothing. Measured on six stored dubs, all six had been
+ * normalized dynamically — a TTS take peaks near -1 dBTP at about -18 LUFS, so
+ * any gain at all breaks a -1.5 dBTP ceiling. The gain rode 2-3 dB across each
+ * clip (+3.8 dB on one sentence, +0.7 dB on another) and the loudness range
+ * shrank (7.3 -> 5.4 LU). loudnessGainFilter() below is the replacement.
  */
 export const PLAYBACK_LOUDNESS = { integratedLufs: -16, truePeakDb: -1.5, lra: 11 };
 
-/** The first pass's report: what the clip measured, as loudnorm wants it back. */
+/** The first pass's report: the clip's integrated loudness and its true peak. */
 export interface LoudnessMeasurement {
   inputI: number;
   inputTp: number;
-  inputLra: number;
-  inputThresh: number;
-  targetOffset: number;
 }
 
 const loudnormTarget = () => {
@@ -416,13 +421,7 @@ export function parseLoudnessMeasurement(
     unknown
   >;
   const read = (key: string) => Number.parseFloat(String(report[key]));
-  const measurement = {
-    inputI: read("input_i"),
-    inputTp: read("input_tp"),
-    inputLra: read("input_lra"),
-    inputThresh: read("input_thresh"),
-    targetOffset: read("target_offset"),
-  };
+  const measurement = { inputI: read("input_i"), inputTp: read("input_tp") };
 
   return Object.values(measurement).every(Number.isFinite) ? measurement : null;
 }
@@ -451,12 +450,26 @@ export async function measureLoudness(
   return parseLoudnessMeasurement(stderr);
 }
 
-/** Pass two's filter: the target plus what pass one measured. */
-export function loudnormFilter(m: LoudnessMeasurement): string {
+/**
+ * Pass two's filter: one gain to the target, the same for every sample. Pure.
+ *
+ * Where that gain would put a peak over the ceiling, a lookahead limiter holds
+ * the ceiling instead. It acts only on the samples over it, so the level of
+ * one sentence against the next — what a listener hears as delivery — is left
+ * as the speaker or the voice made it. `latency` makes the limiter give back
+ * its own lookahead, so the track does not move on the timeline; `level=false`
+ * stops it normalizing the result back up to 0 dB.
+ */
+export function loudnessGainFilter(m: LoudnessMeasurement): string {
+  const { integratedLufs, truePeakDb } = PLAYBACK_LOUDNESS;
+  const gainDb = integratedLufs - m.inputI;
+  const gain = `volume=${gainDb.toFixed(2)}dB`;
+  if (m.inputTp + gainDb <= truePeakDb) return gain;
+
+  const ceiling = 10 ** (truePeakDb / 20);
   return (
-    `${loudnormTarget()}:measured_I=${m.inputI}:measured_TP=${m.inputTp}` +
-    `:measured_LRA=${m.inputLra}:measured_thresh=${m.inputThresh}` +
-    `:offset=${m.targetOffset}:linear=true`
+    `${gain},alimiter=limit=${ceiling.toFixed(4)}` +
+    ":attack=5:release=100:level=false:latency=true"
   );
 }
 
@@ -464,8 +477,7 @@ export function loudnormFilter(m: LoudnessMeasurement): string {
  * The uploaded video with its audio at the playback target.
  *
  * The picture is copied, as in muxVideoWithAudio, and only the first audio
- * track is kept and re-encoded. loudnorm resamples to 192 kHz internally, so
- * the rate is set back to 48 kHz explicitly. A silent track is copied as is.
+ * track is kept and re-encoded, at 48 kHz. A silent track is copied as is.
  */
 export async function normalizeVideoLoudness(
   inPath: string,
@@ -491,7 +503,7 @@ export async function normalizeVideoLoudness(
         ? ["-c:a", "copy"]
         : [
             "-af",
-            loudnormFilter(measured),
+            loudnessGainFilter(measured),
             "-ar",
             "48000",
             "-c:a",
@@ -508,23 +520,32 @@ export async function normalizeVideoLoudness(
 }
 
 /**
- * Encodes to the pipeline's canonical 16 kHz mono MP3.
+ * What ingest normalizes every upload to: the rate Gemini downsamples audio to
+ * anyway, and the one acoustics.ts measures at.
+ */
+export const ANALYSIS_SAMPLE_RATE = 16_000;
+
+/**
+ * Encodes to mono MP3: the analysis copy of an upload at ANALYSIS_SAMPLE_RATE
+ * (the default), or stage 4's Hindi at the rate it was synthesized in.
  *
- * The same format ingest normalizes uploads to (docs/SPEC.md stage 0), so
- * `output.mp3` and `source.mp3` are the same shape and the side-by-side player
- * in Phase 4 has one decoder path rather than two.
+ * The level is left alone. The analysis copy has to keep the recording's own:
+ * acoustics.ts derives its thresholds from it.
  *
- * `normalizeLoudness` brings the result to PLAYBACK_LOUDNESS — for stage 4's
- * Hindi track, which is played. Ingest's analysis copy keeps the recording's
- * own level: acoustics.ts derives its thresholds from it.
+ * The audio is put on the FILE's timeline first. An upload whose audio stream
+ * starts after its video — screen recorders and cut clips do this — would
+ * otherwise lose that offset here, where the picture is dropped: every
+ * timestamp stage 1 reports would be early by it, and so would the Hindi laid
+ * back under the video. Measured 2026-10-06 on a clip with audio starting
+ * 0.48 s in: a beep at 2.00 s of the picture landed at 1.53 s without the
+ * filter and at 2.01 s with it. `async=1` fills a gap with silence and never
+ * stretches; on a file with no offset it does nothing.
  */
 export async function encodeMp3(
   inPath: string,
   outPath: string,
-  options: { normalizeLoudness?: boolean } = {}
+  options: { sampleRate?: number } = {}
 ): Promise<void> {
-  const measured = options.normalizeLoudness ? await measureLoudness(inPath) : null;
-
   await run(
     "ffmpeg",
     [
@@ -537,15 +558,104 @@ export async function encodeMp3(
       // makes ffmpeg try to map its picture into an mp3 and fail; with it, the
       // same call is both stage 0's ingest normalizer and stage 4's encoder.
       "-vn",
-      ...(measured === null ? [] : ["-af", loudnormFilter(measured)]),
+      "-af",
+      "aresample=async=1:first_pts=0",
       "-ar",
-      "16000",
+      String(options.sampleRate ?? ANALYSIS_SAMPLE_RATE),
       "-ac",
       "1",
       "-codec:a",
       "libmp3lame",
       "-q:a",
       "4",
+      outPath,
+    ],
+    { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
+  );
+}
+
+/** What every utterance is conformed to before the join, whichever engine made it. */
+export const SPEECH_FORMAT = { sampleRate: 24_000, channels: 1, bitsPerSample: 16 };
+
+/**
+ * The joined Hindi at the playback level, still lossless and still in
+ * SPEECH_FORMAT: the master that `output.mp3` is encoded from and that goes
+ * under the video.
+ *
+ * Until 2026-10-06 the only finished Hindi was a 16 kHz MP3, and the video got
+ * that MP3 re-encoded to AAC. A 24 kHz voice lost everything above 8 kHz
+ * (measured: its 9-12 kHz band, sibilants and breath, fell from -48 dB to
+ * -87 dB) and went through two lossy encoders, beside an English track left
+ * at 48 kHz. A silent join is copied as is.
+ */
+export async function normalizeSpeechLoudness(
+  inPath: string,
+  outPath: string
+): Promise<void> {
+  const measured = await measureLoudness(inPath);
+
+  await run(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-nostats",
+      "-y",
+      "-i",
+      inPath,
+      ...(measured === null ? [] : ["-af", loudnessGainFilter(measured)]),
+      "-ar",
+      String(SPEECH_FORMAT.sampleRate),
+      "-ac",
+      String(SPEECH_FORMAT.channels),
+      "-c:a",
+      "pcm_s16le",
+      outPath,
+    ],
+    { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }
+  );
+}
+
+/**
+ * One TTS take, made ready to place on the timeline: silence trimmed from both
+ * ends, optionally re-timed, and written in SPEECH_FORMAT.
+ *
+ * The trim is what lets an utterance start ON its cue. Both engines lead with
+ * 0.2-0.3 s of silence (measured), which is a quarter-second of the Hindi being
+ * behind the picture before a word is spoken.
+ *
+ * `tempo` is ffmpeg's `atempo`: it changes duration and keeps pitch. Above 1
+ * it shortens an utterance that would run into the next one; below 1 it
+ * stretches one that would leave a hole. It replaces a second TTS call at a
+ * different speaking rate, which cost money and came back a different length
+ * every time.
+ */
+export async function conformSpeech(
+  inPath: string,
+  outPath: string,
+  options: { tempo?: number } = {}
+): Promise<void> {
+  const trim = "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.02";
+  const filters = [trim, "areverse", trim, "areverse"];
+  if (options.tempo !== undefined && Math.abs(options.tempo - 1) > 0.001) {
+    filters.push(`atempo=${options.tempo.toFixed(4)}`);
+  }
+
+  await run(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-nostats",
+      "-y",
+      "-i",
+      inPath,
+      "-af",
+      filters.join(","),
+      "-ar",
+      String(SPEECH_FORMAT.sampleRate),
+      "-ac",
+      String(SPEECH_FORMAT.channels),
+      "-c:a",
+      "pcm_s16le",
       outPath,
     ],
     { maxBuffer: MAX_FFMPEG_OUTPUT_BYTES }

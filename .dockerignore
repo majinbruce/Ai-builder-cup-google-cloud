@@ -11,3 +11,6 @@ test
 # load-bearing: the runtime stage COPYs src/prompts, and loadPrompt() throws at
 # the first model call if they are missing. Do NOT "tidy" this to **/*.md.
 *.md
+
+# Third-party test clips (see .gitignore): the runtime stage COPYs fixtures/.
+fixtures/clips

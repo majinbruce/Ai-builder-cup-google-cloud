@@ -7,7 +7,11 @@ import {
   runSynthesize,
   type BaselineReport,
 } from "../modules/localize/synthesize.stage.ts";
-import { Adaptation, Analysis } from "../modules/localize/localize.schemas.ts";
+import {
+  AcousticEvidence,
+  Adaptation,
+  Analysis,
+} from "../modules/localize/localize.schemas.ts";
 import {
   fail,
   out,
@@ -56,13 +60,19 @@ const measureBaseline = args.includes("--baseline");
 const voiceArg = args.find((arg) => arg.startsWith("--voice="));
 const voice = voiceArg === undefined ? TTS_VOICE : voiceArg.slice("--voice=".length);
 
-const analysis = Analysis.parse(
-  readStageOutput<{ analysis: unknown }>("outputs/analysis.json", "npm run stage:analyze")
-    .analysis
+const analyzed = readStageOutput<{ analysis: unknown; evidence?: unknown }>(
+  "outputs/analysis.json",
+  "npm run stage:analyze"
 );
+const analysis = Analysis.parse(analyzed.analysis);
+// The teacher's measured pauses, which phrases are placed against. Absent only
+// in an analysis.json written before evidence was saved beside it.
+const evidence = AcousticEvidence.safeParse(analyzed.evidence).data;
 const adaptation = Adaptation.parse(
-  readStageOutput<{ adaptation: unknown }>("outputs/adaptation.json", "npm run stage:adapt")
-    .adaptation
+  readStageOutput<{ adaptation: unknown }>(
+    "outputs/adaptation.json",
+    "npm run stage:adapt"
+  ).adaptation
 );
 
 out();
@@ -125,13 +135,16 @@ const { synthesis } = await runSynthesize({
   adaptation,
   outDir: "outputs",
   voice,
+  ...(evidence === undefined ? {} : { pauses: evidence.pauses }),
   onProgress: (done, total) => {
     process.stdout.write(`\r  synthesizing ${done}/${total}      `);
   },
 });
 
 const wallClockSec = (performance.now() - startedAt) / 1000;
-out(`\r  ${synthesis.utterances?.length ?? 0} utterances synthesized in ${wallClockSec.toFixed(1)}s      `);
+out(
+  `\r  ${synthesis.utterances?.length ?? 0} utterances synthesized in ${wallClockSec.toFixed(1)}s      `
+);
 out();
 
 printSynthesis(synthesis);

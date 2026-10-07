@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { GoogleGenAI } from "@google/genai";
+import type { Interactions } from "@google/genai";
 import { z } from "zod";
 import { config } from "../config/index.ts";
 import type { ModelCall, ModelCallStage } from "../modules/localize/localize.schemas.ts";
+import { pcmToWav } from "./wav.ts";
 
 /**
  * ============================================================================
@@ -54,8 +56,21 @@ const MAX_INLINE_AUDIO_BYTES = 14 * 1024 * 1024;
  * built-in policy (4 retries, exponential backoff, also covering 408/409/429/
  * 5xx), so the worst case is bounded at ~5x this. 150 s is ~1.8x the slowest
  * call measured, analyze at 84.4 s (docs/SPEC.md section g).
+ *
+ * RAISED 2026-10-07 from 150 s to 300 s, with the retries cut from the SDK's 4
+ * to 2. The model was generating about 125 tokens a second that day, where
+ * September's runs imply ~300: a 17 s clip's analyze took 101 s for 13k tokens
+ * and one adapt call 107 s. A 60 s clip's analyze has measured 20-23k tokens,
+ * which at that pace is about three minutes — past the old limit on a call
+ * doing nothing wrong. And a timeout is the expensive kind of failure: the SDK
+ * starts the call again from nothing, so the same thinking is generated, and
+ * quite possibly billed, a second time. So a slow day's honest call now has
+ * room to finish, and a call that never will finish costs three attempts
+ * rather than five. Worst case still ~15 min. `maxRetries` verified honoured
+ * with a 1 ms timeout: 7.1 s of backoff by default, 1.1 s at 2.
  */
-const CALL_TIMEOUT_MS = 150_000;
+const CALL_TIMEOUT_MS = 300_000;
+const CALL_MAX_RETRIES = 2;
 
 /**
  * Exactly the audio MIME types Gemini documents, and nothing else.
@@ -253,7 +268,7 @@ export async function generateJson<T extends z.ZodType>(
         ? {}
         : { generation_config: { thinking_level: thinkingLevel } }),
     },
-    { timeout: CALL_TIMEOUT_MS }
+    { timeout: CALL_TIMEOUT_MS, maxRetries: CALL_MAX_RETRIES }
   );
 
   const latencyMs = Math.round(performance.now() - startedAt);
@@ -322,4 +337,147 @@ export async function generateJson<T extends z.ZodType>(
   );
 
   return { data, call, raw: interaction };
+}
+
+/**
+ * The model that speaks the Hindi. `gemini-3.8-flash-tts` since 2026-10-07: the
+ * stable successor Google names for the 3.1 preview, at under half its price
+ * ($0.50 / $9.00 per 1M text / audio tokens until 2027, against $1 / $20).
+ */
+export const GEMINI_TTS_MODEL = config.tts.geminiModel;
+
+/** Gemini TTS returns 16-bit mono PCM at this rate, headerless or as a WAV. */
+export const GEMINI_TTS_FORMAT = { sampleRate: 24_000, channels: 1, bitsPerSample: 16 };
+
+/**
+ * The preview models that are PROMPTED for speech: one text holding delivery
+ * notes and then the passage, with the model told which is which.
+ *
+ * Everything newer takes the passage as the text and the delivery as a
+ * `speech_metadata` style on it, and the difference is not cosmetic. Measured
+ * 2026-10-07 on four lines: sent the prompted form, gemini-3.8-flash-tts read
+ * the notes ALOUD — 46.6 s of audio for a 7.7 s line, 29.9 s for 5.9 s, 25.5 s
+ * for 3.6 s. Sent the passage with a style, the same lines came back at 0.98,
+ * 0.99 and 1.06 of the length their text predicts. So a model name alone cannot
+ * be swapped in config: which form it is sent has to follow from it, here.
+ */
+const PROMPTED_TTS_MODELS: ReadonlySet<string> = new Set([
+  "gemini-3.1-flash-tts-preview",
+  "gemini-2.5-flash-preview-tts",
+  "gemini-2.5-pro-preview-tts",
+]);
+
+/** Whether a TTS model takes its delivery notes inside the prompt. Pure. */
+export function ttsTakesNotesInPrompt(model: string = GEMINI_TTS_MODEL): boolean {
+  return PROMPTED_TTS_MODELS.has(model);
+}
+
+export interface SpeechRequest {
+  /** The words to say, and nothing else. */
+  text: string;
+  /** How to say them, in a sentence or two. */
+  style: string;
+  /** The same thing for a prompted model: notes, then the passage, as one text. */
+  prompt: string;
+  voice: string;
+  languageCode: string;
+}
+
+/**
+ * The request body for one utterance, in the form `model` takes. Pure.
+ *
+ * Returned as a plain object: the `speech_metadata` annotation is newer than
+ * the typings of the SDK this project pins (2.21.0 has `user_input` and no
+ * annotation type), while the API itself accepts it — four live calls on
+ * 2026-10-07. generateSpeech() is the one place it is handed to the client.
+ */
+export function speechRequestBody(
+  model: string,
+  request: SpeechRequest
+): Record<string, unknown> {
+  const generation_config = {
+    speech_config: [{ voice: request.voice, language: request.languageCode }],
+  };
+
+  if (ttsTakesNotesInPrompt(model)) {
+    return {
+      model,
+      input: request.prompt,
+      response_modalities: ["audio"],
+      generation_config,
+    };
+  }
+
+  return {
+    model,
+    input: [
+      {
+        type: "user_input",
+        content: [
+          {
+            type: "text",
+            text: request.text,
+            annotations: [{ type: "speech_metadata", style: request.style }],
+          },
+        ],
+      },
+    ],
+    response_format: { type: "audio" },
+    generation_config,
+  };
+}
+
+export interface GenerateSpeechResult {
+  /** A complete WAV file. */
+  audio: Buffer;
+  latencyMs: number;
+  inputTokens: number;
+  /** Audio tokens, 25 per second of speech. */
+  outputTokens: number;
+}
+
+/**
+ * One Gemini TTS call: the words to say and how to say them, audio back.
+ *
+ * Not `generateJson`: there is no schema and no text, the reply is
+ * `output_audio`. The caller still checks the length of what comes back,
+ * because nothing here can tell whether a model said more than the passage.
+ */
+export async function generateSpeech(
+  request: SpeechRequest
+): Promise<GenerateSpeechResult> {
+  const startedAt = performance.now();
+
+  const interaction = await getGeminiClient().interactions.create(
+    // See speechRequestBody(): the style annotation is ahead of the pinned typings.
+    speechRequestBody(
+      GEMINI_TTS_MODEL,
+      request
+    ) as unknown as Interactions.CreateModelInteractionParamsNonStreaming,
+    { timeout: CALL_TIMEOUT_MS, maxRetries: CALL_MAX_RETRIES }
+  );
+
+  // Never true for this request; it is what tells the compiler, which cannot
+  // see through the cast which overload was called, that this is not a stream.
+  if (!("status" in interaction)) {
+    throw new Error("Gemini TTS answered a non-streaming request with a stream.");
+  }
+
+  const data = interaction.output_audio?.data;
+  if (data === undefined || data === "") {
+    throw new Error(
+      `Gemini TTS returned no audio (interaction ${interaction.id}, status ` +
+        `${String(interaction.status)}).`
+    );
+  }
+
+  const bytes = Buffer.from(data, "base64");
+  const isWav = bytes.toString("ascii", 0, 4) === "RIFF";
+
+  return {
+    audio: isWav ? bytes : pcmToWav(bytes, GEMINI_TTS_FORMAT),
+    latencyMs: Math.round(performance.now() - startedAt),
+    inputTokens: interaction.usage?.total_input_tokens ?? 0,
+    outputTokens: interaction.usage?.total_output_tokens ?? 0,
+  };
 }

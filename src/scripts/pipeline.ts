@@ -13,7 +13,7 @@ import {
   selectForRetry,
 } from "../modules/localize/critique.stage.ts";
 import { runSynthesize } from "../modules/localize/synthesize.stage.ts";
-import { Analysis } from "../modules/localize/localize.schemas.ts";
+import { AcousticEvidence, Analysis } from "../modules/localize/localize.schemas.ts";
 import type {
   Adaptation,
   ModelCall,
@@ -76,7 +76,9 @@ const calls: ModelCall[] = [];
 out();
 out(
   "  Intent-preserving localization — " +
-    (noAudio ? "analyze -> adapt -> critique" : "analyze -> adapt -> critique -> synthesize")
+    (noAudio
+      ? "analyze -> adapt -> critique"
+      : "analyze -> adapt -> critique -> synthesize")
 );
 out(`  model     ${GEMINI_MODEL}`);
 out(
@@ -90,14 +92,17 @@ out();
 /* -------------------------------------------------------------------------- */
 
 let analysis: Analysis;
+// What ffmpeg measured, for stage 4: it places phrases against the teacher's
+// pauses. Absent only when an analysis.json from before evidence was saved is reused.
+let evidence: AcousticEvidence | undefined;
 
 if (fromAnalysis) {
-  analysis = Analysis.parse(
-    readStageOutput<{ analysis: unknown }>(
-      "outputs/analysis.json",
-      "npm run stage:analyze"
-    ).analysis
+  const stored = readStageOutput<{ analysis: unknown; evidence?: unknown }>(
+    "outputs/analysis.json",
+    "npm run stage:analyze"
   );
+  analysis = Analysis.parse(stored.analysis);
+  evidence = AcousticEvidence.safeParse(stored.evidence).data;
   out(`  [1/4] analyze  SKIPPED — reusing outputs/analysis.json (--from-analysis)`);
   out(`        ${analysis.segments.length} segments, topic: ${analysis.topic}`);
 } else {
@@ -115,6 +120,7 @@ if (fromAnalysis) {
 
   const result = await runAnalyze({ audioPath });
   analysis = result.analysis;
+  evidence = result.evidence;
   calls.push(result.call);
 
   writeStageOutput("analysis.json", {
@@ -178,7 +184,7 @@ const { critique, call: critiqueCall } = await runCritique({
 });
 calls.push(critiqueCall);
 
-const selected = selectForRetry(critique, firstPass);
+const selected = selectForRetry(critique, firstPass, [], analysis);
 
 let adaptation: Adaptation = firstPass;
 let retriedIds: string[] = [];
@@ -226,7 +232,9 @@ if (noAudio) {
   out("  [4/4] synth    SKIPPED (--no-audio)");
 } else {
   out();
-  out("  [4/4] synth    Chirp 3 HD, one call per sentence group, fitted to the source timeline...");
+  out(
+    "  [4/4] synth    Chirp 3 HD, one call per sentence group, fitted to the source timeline..."
+  );
 
   if ((await ffmpegAvailable()) === null) {
     fail("ffmpeg is not on PATH, so stage 4 cannot concatenate. sudo apt install ffmpeg");
@@ -242,6 +250,7 @@ if (noAudio) {
     analysis,
     adaptation,
     outDir: "outputs",
+    ...(evidence === undefined ? {} : { pauses: evidence.pauses }),
     onProgress: (done, total) => {
       process.stdout.write(`\r        ${done}/${total}          `);
     },
@@ -249,7 +258,9 @@ if (noAudio) {
 
   synthesis = result.synthesis;
   out(`\r        ${synthesis.utterances?.length ?? 0} utterances synthesized      `);
-  out(`        ${synthesis.durationSec.toFixed(1)}s of Hindi audio, ${synthesis.billedChars} billed chars`);
+  out(
+    `        ${synthesis.durationSec.toFixed(1)}s of Hindi audio, ${synthesis.billedChars} billed chars`
+  );
 }
 
 const wallClockSec = (performance.now() - startedAt) / 1000;

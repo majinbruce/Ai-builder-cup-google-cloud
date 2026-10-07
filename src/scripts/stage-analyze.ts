@@ -125,6 +125,9 @@ out(`  topic     ${analysis.topic}`);
 out(`  audience  ${analysis.audience}`);
 out(`  language  ${analysis.sourceLanguage}`);
 out(`  segments  ${analysis.segments.length}`);
+for (const speaker of analysis.speakers ?? []) {
+  out(`  speaker   ${speaker.id}: ${speaker.voice} voice — ${speaker.description}`);
+}
 out();
 
 for (const segment of analysis.segments) {
@@ -161,7 +164,8 @@ function printSegment(segment: AnalyzedSegment): void {
 
   out(
     `  ${segment.id}  ${span.padEnd(13)} ${segment.signal.toUpperCase().padEnd(15)} ` +
-      `conf ${confidence}  ${segment.register}/${segment.pace}`
+      `conf ${confidence}  ${segment.register}/${segment.pace}` +
+      (segment.speaker === undefined ? "" : `  speaker ${segment.speaker}`)
   );
   out(`      "${segment.text}"`);
   out(`      why: ${segment.signalEvidence}`);
@@ -231,6 +235,20 @@ function printCorroboration(report: Corroboration): void {
     `  ${report.boundariesAligned}/${report.boundariesTotal} interior segment boundaries ` +
       `within 300ms of a measured pause (${alignRate})`
   );
+
+  // Counted above on the model's timestamps; this is what was then done to them.
+  const anchors = report.boundaryAnchors ?? [];
+  if (anchors.length > 0) {
+    const moved = (anchor: (typeof anchors)[number]) =>
+      Math.abs(anchor.measuredSec - anchor.modelSec);
+    const largest = anchors.reduce((a, b) => (moved(b) > moved(a) ? b : a));
+    out(
+      `  ${anchors.length} segment edges then moved onto the pause they sat in ` +
+        `(largest: ${largest.segmentId} ${largest.edge}, ` +
+        `${largest.modelSec.toFixed(1)}s -> ${largest.measuredSec.toFixed(2)}s). ` +
+        "The segments above carry the measured edges."
+    );
+  }
   out();
   out("  Read the energy number, not the headline. A claim also counts as supported");
   out("  when a pause merely closes its span — but the prompt TELLS the model to cut");

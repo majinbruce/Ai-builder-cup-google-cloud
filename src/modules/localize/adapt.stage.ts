@@ -1,6 +1,6 @@
 import { generateJson, type CallLogger, type ThinkingLevel } from "../../lib/gemini.ts";
 import { loadPrompt } from "../../lib/prompts.ts";
-import { charBudget, findLatinRuns } from "./drift.ts";
+import { charBudget, countSpokenChars, findLatinRuns } from "./drift.ts";
 import { AdaptationBrief, AdaptedSegment } from "./localize.schemas.ts";
 import type {
   Adaptation,
@@ -8,7 +8,9 @@ import type {
   AnalyzedSegment,
   ModelCall,
   SegmentCritique,
+  Speaker,
 } from "./localize.schemas.ts";
+import { speakerOf } from "./speakers.ts";
 
 /**
  * ============================================================================
@@ -121,7 +123,9 @@ export async function runAdapt(input: AdaptInput): Promise<AdaptOutput> {
     const { data, call } = await generateJson({
       schema: AdaptedSegment,
       prompt,
-      parts: [{ type: "text", text: buildSegmentInput(brief, segment, adapted) }],
+      parts: [
+        { type: "text", text: buildSegmentInput(brief, segment, adapted, analysis) },
+      ],
       stage: "adapt",
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(logger === undefined ? {} : { logger }),
@@ -209,11 +213,20 @@ export async function runAdaptRetry(input: RetryInput): Promise<RetryOutput> {
         {
           type: "text",
           text:
-            buildSegmentInput(adaptation.brief, source, segments.slice(0, position)) +
+            buildSegmentInput(
+              adaptation.brief,
+              source,
+              segments.slice(0, position),
+              analysis
+            ) +
             "\n\n" +
             formatCritiqueForRetry(
               critique,
-              findLatinRuns(segments[position]?.targetText ?? "").map((run) => run.text)
+              findLatinRuns(segments[position]?.targetText ?? "").map((run) => run.text),
+              {
+                chars: countSpokenChars(segments[position]?.targetText ?? ""),
+                budget: charBudget(source),
+              }
             ),
         },
       ],
@@ -253,6 +266,17 @@ function withId(segment: AdaptedSegment, expectedId: string): AdaptedSegment {
   return segment;
 }
 
+/** A speaker as the prompts name them: how they sound, then who they are. */
+function describeSpeaker(speaker: Speaker): string {
+  const voice =
+    speaker.voice === "female"
+      ? "a woman's voice"
+      : speaker.voice === "male"
+        ? "a man's voice"
+        : "voice not identified";
+  return `${voice}; ${speaker.description}`;
+}
+
 /**
  * The whole analysis, flattened for the brief call.
  *
@@ -272,13 +296,26 @@ export function formatAnalysisForBrief(analysis: Analysis): string {
     `Target language: Hindi (${TARGET_LANGUAGE})`,
     `Segments: ${analysis.segments.length}`,
     "",
-    "## The segments, in order",
-    "",
   ];
 
+  // Who speaks decides Hindi's grammar as well as its voice, so the brief sees
+  // it: the persona is the one who talks most, and the rest are named too.
+  const speakers = analysis.speakers ?? [];
+  if (speakers.length > 0) {
+    lines.push("## Who speaks", "");
+    for (const speaker of speakers) {
+      lines.push(`- ${speaker.id}: ${describeSpeaker(speaker)}`);
+    }
+    lines.push("");
+  }
+
+  lines.push("## The segments, in order", "");
+
   for (const segment of analysis.segments) {
+    const speaker = speakerOf(analysis, segment);
     lines.push(
-      `### ${segment.id} — ${segment.signal} · ${segment.register} · ${segment.pace}`
+      `### ${segment.id} — ${segment.signal} · ${segment.register} · ${segment.pace}` +
+        (speaker === undefined || speakers.length < 2 ? "" : ` · speaker ${speaker.id}`)
     );
     lines.push(`"${segment.text}"`);
 
@@ -309,7 +346,13 @@ export function formatAnalysisForBrief(analysis: Analysis): string {
 export function buildSegmentInput(
   brief: AdaptationBrief,
   segment: AnalyzedSegment,
-  alreadyAdapted: AdaptedSegment[]
+  alreadyAdapted: AdaptedSegment[],
+  /**
+   * For who is speaking: the speakers, and the earlier segments to find out who
+   * said the line before this one. Without it nothing is said about speakers,
+   * which is also what a job analyzed before 2026-10-07 gets.
+   */
+  analysis?: Pick<Analysis, "speakers" | "segments">
 ): string {
   const lines: string[] = [
     "## The brief",
@@ -361,6 +404,24 @@ export function buildSegmentInput(
   );
   lines.push(`why that label: ${segment.signalEvidence}`);
   lines.push(`register: ${segment.register}   pace: ${segment.pace}`);
+
+  const speaker = analysis === undefined ? undefined : speakerOf(analysis, segment);
+  if (analysis !== undefined && speaker !== undefined) {
+    lines.push(`speaker: ${speaker.id} — ${describeSpeaker(speaker)}`);
+
+    // A reply reads differently from a continuation, and the Hindi for it is
+    // addressed TO someone: say who had the line before, when it was not them.
+    const index = analysis.segments.findIndex((entry) => entry.id === segment.id);
+    const before = index > 0 ? analysis.segments[index - 1] : undefined;
+    const previous = before === undefined ? undefined : speakerOf(analysis, before);
+    if (previous !== undefined && previous.id !== speaker.id) {
+      lines.push(
+        `the line before this (${before?.id}) was ${previous.id}'s — ` +
+          `${describeSpeaker(previous)}. This is a different person speaking.`
+      );
+    }
+  }
+
   lines.push("");
   lines.push(`English: "${segment.text}"`);
   lines.push("");
@@ -396,7 +457,7 @@ export function buildSegmentInput(
   lines.push(
     `Soft length budget: about ${charBudget(segment)} Devanagari characters ` +
       `(the speaker took ${(segment.endSec - segment.startSec).toFixed(1)}s). ` +
-      "Go over it when the teaching needs the room; never pad to reach it."
+      "Stay inside it unless the teaching itself needs the room; never pad to reach it."
   );
 
   return lines.join("\n");
@@ -418,7 +479,8 @@ export function buildSegmentInput(
  */
 export function formatCritiqueForRetry(
   critique: SegmentCritique,
-  latinRuns: readonly string[] = []
+  latinRuns: readonly string[] = [],
+  length?: { chars: number; budget: number }
 ): string {
   const lines: string[] = [
     "## Revision requested",
@@ -450,6 +512,15 @@ export function formatCritiqueForRetry(
       "Your Hindi contains Latin script, which the hi-IN voice cannot be trusted to",
       `pronounce: ${latinRuns.map((run) => `"${run}"`).join(", ")}. Write every one`,
       "of these in Devanagari. This is required, not a style note.",
+      ""
+    );
+  }
+  if (length !== undefined && length.chars > length.budget) {
+    lines.push(
+      `Your Hindi is ${length.chars} characters; the voice has time for about`,
+      `${length.budget} in this slot. Over that, this sentence runs into the next one`,
+      "and the dub falls behind the picture. Say the same thing in fewer words:",
+      "shorter phrasing, no padding — and no content dropped.",
       ""
     );
   }

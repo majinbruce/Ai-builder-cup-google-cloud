@@ -251,8 +251,8 @@ export function printCalls(calls: ModelCall[]): void {
  * reasoning panel shows the exact TTS settings applied, and this is the terminal
  * version of that promise — a reader can copy a line out of here into the API
  * explorer and get the same audio back. House style per this file's header:
- * print the misses, which here are emphasis terms absent from their own Hindi and
- * utterances that needed a faster re-take to fit their source time.
+ * print the misses, which here are emphasis terms absent from their own Hindi,
+ * lines that had to be recorded again, and what each take would have left.
  */
 export function printSynthesis(synthesis: Synthesis): void {
   const utterances = synthesis.utterances ?? [];
@@ -260,21 +260,42 @@ export function printSynthesis(synthesis: Synthesis): void {
 
   out("  --- how each utterance was spoken and placed (measured, not estimated) ---");
   out();
-  out("  #   segments        at      slot   1st take   kept    rate   refit");
+  out("  #   segments        at      slot  teacher     take   placed  pace       tempo");
 
   for (const utterance of utterances) {
     const slot = utterance.deadlineSec - utterance.sourceStartSec;
+    // Read off the two lengths: for a Chirp take `speakingRate` also carries
+    // the rate it was synthesized at.
+    const tempo = utterance.naturalDurationSec / utterance.measuredDurationSec;
     out(
       `  ${String(utterance.index).padEnd(3)} ${utterance.segmentIds.join("+").padEnd(14)} ` +
         `${`${utterance.outputStartSec.toFixed(1)}s`.padStart(6)} ` +
         `${`${slot.toFixed(1)}s`.padStart(8)} ` +
-        `${`${utterance.naturalDurationSec.toFixed(1)}s`.padStart(9)} ` +
-        `${`${utterance.measuredDurationSec.toFixed(1)}s`.padStart(7)}  ` +
-        `${utterance.requestedRate.toFixed(2)}${utterance.refit ? `→${utterance.speakingRate.toFixed(2)}` : "     "}  ` +
-        `${utterance.refit ? "yes" : "—"}`
+        `${(utterance.speechSec === undefined ? "—" : `${utterance.speechSec.toFixed(1)}s`).padStart(8)} ` +
+        `${`${utterance.naturalDurationSec.toFixed(1)}s`.padStart(8)} ` +
+        `${`${utterance.measuredDurationSec.toFixed(1)}s`.padStart(8)}  ` +
+        `${(utterance.pace ?? "—").padEnd(10)} ` +
+        `${utterance.refit ? `×${tempo.toFixed(2)}` : "—"}`
     );
   }
   out();
+
+  // Every line recorded more than once, with what using each take would have
+  // meant: the reason there is a second take, and the reason for the choice.
+  const retaken = utterances.filter((utterance) => utterance.takes !== undefined);
+  for (const utterance of retaken) {
+    out(`  #${utterance.index} was recorded ${utterance.takes?.length} times:`);
+    for (const take of utterance.takes ?? []) {
+      out(
+        `      ${take.kept ? "kept" : "    "}  ${take.pace.padEnd(10)} ` +
+          `${`${take.durationSec.toFixed(2)}s`.padStart(7)}  ` +
+          (take.lateSec > 0
+            ? `next line ${take.lateSec.toFixed(2)}s late`
+            : `teacher unheard for ${take.silentSec.toFixed(2)}s`)
+      );
+    }
+  }
+  if (retaken.length > 0) out();
 
   for (const utterance of utterances) {
     out(
@@ -292,9 +313,13 @@ export function printSynthesis(synthesis: Synthesis): void {
       : `  ${notFound.length} emphasis term(s) do NOT occur in their own segment's Hindi: ` +
           notFound.map((term) => `"${term}"`).join(", ")
   );
+  const late = utterances.filter(
+    (utterance) => utterance.outputStartSec - utterance.sourceStartSec > 0.05
+  );
   out(
-    `  ${utterances.filter((utterance) => utterance.refit).length}/${utterances.length} ` +
-      `utterances re-taken faster to meet their deadline. Output ${synthesis.durationSec.toFixed(1)}s ` +
+    `  ${retaken.length}/${utterances.length} utterances recorded more than once; ` +
+      `${utterances.filter((utterance) => utterance.refit).length} re-timed; ` +
+      `${late.length} start behind their cue. Output ${synthesis.durationSec.toFixed(1)}s ` +
       `for a ${sourceSec.toFixed(1)}s source.`
   );
   out();
@@ -326,12 +351,16 @@ export function printMeasuredTiming(
   out("  --- length drift: the estimate vs the measurement ---");
   out();
   out(`  source span, summed          ${sourceSec.toFixed(1)}s`);
-  out(`  projected from text alone    ${estimated.estimatedTargetSec.toFixed(1)}s  ` +
-    `(${estimated.ratio >= 0 ? "+" : ""}${(estimated.ratio * 100).toFixed(1)}%, ` +
-    `projected at ${MEASURED_CHARS_PER_SEC} chars/sec)`);
-  out(`  MEASURED, as synthesized     ${spokenSec.toFixed(1)}s  ` +
-    `(${sourceSec === 0 ? 0 : (((spokenSec - sourceSec) / sourceSec) * 100).toFixed(1)}%, ` +
-    `synthesized and ffprobe'd)`);
+  out(
+    `  projected from text alone    ${estimated.estimatedTargetSec.toFixed(1)}s  ` +
+      `(${estimated.ratio >= 0 ? "+" : ""}${(estimated.ratio * 100).toFixed(1)}%, ` +
+      `projected at ${MEASURED_CHARS_PER_SEC} chars/sec)`
+  );
+  out(
+    `  MEASURED, as synthesized     ${spokenSec.toFixed(1)}s  ` +
+      `(${sourceSec === 0 ? 0 : (((spokenSec - sourceSec) / sourceSec) * 100).toFixed(1)}%, ` +
+      `synthesized and ffprobe'd)`
+  );
   out(`  concatenated output.mp3      ${synthesis.durationSec.toFixed(1)}s`);
   out();
 
@@ -347,6 +376,8 @@ export function printMeasuredTiming(
       "Run --baseline to measure the plain rate again."
   );
   out();
-  out(`  synthesis cost: ${synthesis.billedChars} billed characters, voice ${synthesis.voice}.`);
+  out(
+    `  synthesis cost: ${synthesis.billedChars} billed characters, voice ${synthesis.voice}.`
+  );
   out();
 }

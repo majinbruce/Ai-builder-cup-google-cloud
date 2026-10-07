@@ -13,9 +13,11 @@ import {
   latinScriptViolations,
   RETRY_THRESHOLD,
   selectForRetry,
+  overLengthBudget,
 } from "../src/modules/localize/critique.stage.ts";
 import {
   charBudget,
+  charCeiling,
   countSpokenChars,
   MEASURED_CHARS_PER_SEC,
   findLatinRuns,
@@ -405,7 +407,7 @@ describe("length budgets and drift", () => {
     // Within one rounding quantum of exactly double, rather than exactly double:
     // charBudget() rounds to the nearest 5 so a prompt cannot read it as an exact
     // target, and rounding two spans independently does not distribute over
-    // doubling. At 12.72 chars/sec, 5s budgets 65 and 10s budgets 125.
+    // doubling. At 12.72 chars/sec, 5s budgeted 65 and 10s budgeted 125.
     expect(Math.abs(long - short * 2)).toBeLessThanOrEqual(5);
   });
 
@@ -654,5 +656,91 @@ describe("per-stage telemetry and thinking", () => {
    */
   it("defaults critique to the thinking level the measurement chose", () => {
     expect(CRITIQUE_THINKING_LEVEL).toBe("low");
+  });
+});
+
+describe("overLengthBudget — Hindi that cannot be said in its slot", () => {
+  // 4 s: a budget of 45 characters at the voice's pace, a ceiling of 50 with
+  // stage 4's speed-up spent.
+  const span = { startSec: 10, endSec: 14 };
+
+  it("passes text up to what the voice can say at its briskest", () => {
+    expect(charCeiling(span)).toBe(50);
+    expect(overLengthBudget(span, "क".repeat(charBudget(span)))).toBeNull();
+    expect(overLengthBudget(span, "क".repeat(charCeiling(span)))).toBeNull();
+  });
+
+  it("flags text stage 4's speed-up cannot absorb, with both numbers", () => {
+    const chars = charCeiling(span) + 1;
+    expect(overLengthBudget(span, "क".repeat(chars))).toEqual({
+      chars,
+      budget: charBudget(span),
+    });
+  });
+
+  it("catches the line that put a reply 0.83 s behind the man giving it", () => {
+    // The first run with speakers: 103 characters for a line that had from 0 s
+    // to the reply's cue at 7.138 s. Thirty percent over the rounded budget was
+    // 104, so the old gate let it through by one character; it could not be
+    // said in time at any speed stage 4 allows.
+    const line = { startSec: 0, endSec: 6.634 };
+    expect(charCeiling(line, 7.138)).toBe(90);
+    expect(overLengthBudget(line, "क".repeat(103), 7.138)).toEqual({
+      chars: 103,
+      budget: 80,
+    });
+  });
+
+  it("does not judge a span too short for a budget to mean anything", () => {
+    expect(overLengthBudget({ startSec: 0, endSec: 1.5 }, "क".repeat(200))).toBeNull();
+  });
+
+  it("sends an over-long segment back even when the critic was happy with it", () => {
+    const analysis = { segments: [{ id: "s01", startSec: 0, endSec: 4 }] } as Analysis;
+    const long = adaptation([adaptedSegment({ targetText: "क".repeat(120) })]);
+    expect(selectForRetry(critique(), long)).toHaveLength(0);
+    const [selected] = selectForRetry(critique(), long, [], analysis);
+    expect(selected?.reasons.join(" ")).toContain("too long for its slot");
+  });
+
+  it("counts the teacher's pause after a segment as room the Hindi can use", () => {
+    // A segment ends where the teacher stops (anchor.ts); the next one starts
+    // 1.8 s later. Sixty characters do not fit the 4 s of speech and do fit the
+    // 5.8 s to the next cue, so re-adapting them would spend a call on
+    // something stage 4 already absorbs.
+    expect(overLengthBudget(span, "क".repeat(60))).not.toBeNull();
+    expect(overLengthBudget(span, "क".repeat(60), 15.8)).toBeNull();
+
+    // Past the whole slot it is still sent back, with the slot's own budget.
+    const far = charCeiling(span, 15.8) + 1;
+    expect(overLengthBudget(span, "क".repeat(far), 15.8)).toEqual({
+      chars: far,
+      budget: charBudget({ startSec: 10, endSec: 15.8 }),
+    });
+  });
+
+  it("reads each segment's slot from the next segment's start", () => {
+    const analysis = {
+      segments: [
+        { id: "s01", startSec: 0, endSec: 4 },
+        { id: "s02", startSec: 6, endSec: 10 },
+      ],
+    } as Analysis;
+    // 65 characters: under the 75 that fit the 6 s to the next cue, over the 50
+    // that fit a last segment's own 4 s.
+    const text = "क".repeat(65);
+    const both = adaptation([
+      adaptedSegment({ id: "s01", targetText: text }),
+      adaptedSegment({ id: "s02", targetText: text }),
+    ]);
+    const scored = critique([
+      segmentCritique({ id: "s01" }),
+      segmentCritique({ id: "s02" }),
+    ]);
+
+    // s01 has the pause; s02 is last and has only its own span.
+    expect(selectForRetry(scored, both, [], analysis).map((r) => r.critique.id)).toEqual([
+      "s02",
+    ]);
   });
 });

@@ -45,6 +45,27 @@ recap is two.
   correct; a segment that starts mid-clause on a measured pause is wrong.
 - `text` is a verbatim transcript of that span. Transcribe what was said,
   including a false start if there is one. Do not clean it up, do not summarize.
+- **One segment, one speaker.** A change of speaker is always a boundary, and
+  it wins over everything above, the 4–12 second target included. A question
+  from the room, or a two-word reply ("I have no idea."), is its own segment
+  even if it lasts a second. Never put two people's words in one `text`.
+
+## Who is speaking
+
+`speakers` lists every distinct voice in the clip, in the order they are first
+heard, with `id` "A", "B", and so on. Most clips have one. Listen for a second:
+an interviewer, a student asking a question, a colleague answering off to the
+side. The same person is one speaker however many times they come back.
+
+- `voice` is how that voice sounds: `female` or `male`. It is what the Hindi
+  voice for this speaker will be cast from, so report what you hear, not what a
+  name or the subject suggests. Use `unknown` only when you genuinely cannot
+  tell — a child, a crowd, a heavily processed voice.
+- `description` is who they are in this clip, in a few words: "the presenter,
+  speaking to camera", "a colleague at the whiteboard, answering her".
+
+Every segment's `speaker` is the `id` of the one person who says it. Always
+give it, and only ever an `id` that is in `speakers`.
 
 ## The pedagogical signal
 
@@ -110,6 +131,13 @@ Two rules, and the second one matters more than it looks:
 
 `strength` is `strong` for stress that stands out clearly, `moderate` for a
 light lean on a word.
+
+`atSec` is the moment the stressed term is spoken, in seconds from the start of
+the clip, to one decimal place. Always give it. It must fall inside the
+segment's own `startSec`–`endSec`. If the term is said more than once in the
+segment, give the time of the occurrence that was stressed. The downstream check
+looks at the measured level and the silences in the second around this exact
+time, so a careless timestamp turns a correct observation into a failed one.
 
 ## The acoustic measurements
 

@@ -134,23 +134,63 @@ describe("adaptive silence threshold", () => {
     expect(result.pauses).toHaveLength(11);
   });
 
-  it("falls back to the offset that found the most pauses when none qualifies", async () => {
-    // A clip where every threshold is either too strict or too loose still has
-    // to produce a pause list; returning nothing would mean no boundaries and
-    // no corroboration at all.
+  it("falls back to the last rung over the band, cut to its longest pauses", async () => {
+    // Measured shape of a speaker who clips every phrase: over the band at
+    // every rung. The old rule kept the LARGEST list, a pause every 1.25 s.
     const byThreshold = new Map([
-      [-20.4, 0],
-      [-22.4, 1],
-      [-24.4, 40],
-      [-28.4, 90],
-      [-32.4, 120],
+      [-20.4, 48],
+      [-22.4, 47],
+      [-24.4, 47],
+      [-28.4, 46],
+      [-32.4, 44],
+      [-36.4, 36],
+      [-40.4, 20],
     ]);
 
-    const result = await chooseSilenceThreshold(-16.4, 63.1, (thresholdDb) =>
+    const result = await chooseSilenceThreshold(-16.4, 60, (thresholdDb) =>
+      Promise.resolve(
+        Array.from({ length: byThreshold.get(thresholdDb) ?? 0 }, (_, i) => ({
+          startSec: i * 2,
+          endSec: i * 2 + 0.2 + i * 0.01,
+          durationSec: 0.2 + i * 0.01,
+        }))
+      )
+    );
+
+    expect(result.offsetDb).toBe(24);
+    // 15 a minute is the top of the band; the five shortest are dropped.
+    expect(result.pauses).toHaveLength(15);
+    expect(result.pauses[0]?.startSec).toBe(10);
+    expect(result.pauses.map((p) => p.startSec)).toEqual(
+      [...result.pauses.map((p) => p.startSec)].sort((x, y) => x - y)
+    );
+  });
+
+  it("keeps the dense rung, trimmed, when the band is jumped over", async () => {
+    const byThreshold = new Map([
+      [-20.4, 36],
+      [-22.4, 34],
+      [-24.4, 31],
+      [-28.4, 27],
+      [-32.4, 21],
+      [-36.4, 4],
+      [-40.4, 0],
+    ]);
+
+    const result = await chooseSilenceThreshold(-16.4, 60, (thresholdDb) =>
       Promise.resolve(silencesOfLength(byThreshold.get(thresholdDb) ?? 0))
     );
 
-    expect(result.pauses).toHaveLength(120);
+    expect(result.offsetDb).toBe(16);
+    expect(result.pauses).toHaveLength(15);
+  });
+
+  it("keeps the rung that found the most when every rung is under the band", async () => {
+    const result = await chooseSilenceThreshold(-16.4, 60, (thresholdDb) =>
+      Promise.resolve(silencesOfLength(thresholdDb === -20.4 ? 3 : 1))
+    );
+
+    expect(result.pauses).toHaveLength(3);
   });
 });
 
@@ -297,6 +337,40 @@ describe("corroboration", () => {
     // the prompt tells the model to cut at pauses, so this is weaker evidence.
     expect(report.supportedByEnergy).toBe(0);
     expect(report.supportedByPauseOnly).toBe(1);
+  });
+
+  it("checks a timed term against the second around it, not the whole segment", () => {
+    const timed = (atSec: number): Analysis => {
+      const analysis = analysisWith("idempotent", 0, 10);
+      const marker = analysis.segments[0]?.emphasis[0];
+      if (marker !== undefined) marker.atSec = atSec;
+      return analysis;
+    };
+    const evidence = evidenceWith({
+      windows: [
+        { startSec: 2, rmsDb: -14, prominent: true },
+        { startSec: 8, rmsDb: -20, prominent: false },
+      ],
+      pauses: [{ startSec: 4, endSec: 4.5, durationSec: 0.5 }],
+    });
+
+    // The rise at 2.0-2.5 s and the pause at 4 s are both inside the segment.
+    expect(corroborate(timed(2.4), evidence).supportedByEnergy).toBe(1);
+    expect(corroborate(timed(8), evidence).unsupported).toBe(1);
+    // A timestamp outside its own segment is not trusted over the span.
+    expect(corroborate(timed(40), evidence).supported).toBe(1);
+  });
+
+  it("takes the prominence median over speech, not over the silences too", () => {
+    const windows = [-60, -60, -60, -20, -20, -16].map((rmsDb, i) => ({
+      startSec: i * 0.5,
+      rmsDb,
+    }));
+
+    expect(markProminence(windows).marked.filter((w) => w.prominent)).toHaveLength(3);
+    expect(markProminence(windows, -40).marked.filter((w) => w.prominent)).toHaveLength(
+      1
+    );
   });
 
   it("marks a claim unsupported when nothing was measured under it", () => {
