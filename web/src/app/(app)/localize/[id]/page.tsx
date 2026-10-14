@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { JobView } from "@/components/localize/job-view";
+import { WatchView } from "@/components/watch/watch-view";
 import { ApiError } from "@/lib/api/envelope";
 import { jobResponse } from "@/lib/api/localize";
 import { apiFetchServer } from "@/lib/api/server";
@@ -33,5 +33,5 @@ export default async function JobPage({ params }: PageProps<"/localize/[id]">) {
 
   if (job === null) notFound();
 
-  return <JobView initialJob={job} />;
+  return <WatchView initialJob={job} />;
 }

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AudioLines, Loader2, MoreVertical, Trash2, Video } from "lucide-react";
+import { AudioLines, MoreVertical, Trash2, Video } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -15,7 +15,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,18 +27,15 @@ import type { JobStatus, JobSummary } from "@/lib/api/schemas";
 import { cn } from "@/lib/utils";
 import { formatTime } from "@/components/localize/format";
 
-const STATUS: Record<JobStatus, { label: string; className: string }> = {
-  queued: { label: "Queued", className: "bg-muted text-muted-foreground" },
-  ingesting: { label: "Preparing", className: "bg-primary/10 text-primary" },
-  analyzing: { label: "Listening", className: "bg-primary/10 text-primary" },
-  adapting: { label: "Re-teaching", className: "bg-primary/10 text-primary" },
-  critiquing: { label: "Checking", className: "bg-primary/10 text-primary" },
-  synthesizing: { label: "Voicing", className: "bg-primary/10 text-primary" },
-  done: {
-    label: "Ready",
-    className: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-  },
-  failed: { label: "Failed", className: "bg-destructive/10 text-destructive" },
+const STATUS: Record<JobStatus, { label: string; color: string }> = {
+  queued: { label: "Queued", color: "rgb(255 231 206 / 40%)" },
+  ingesting: { label: "Preparing", color: "#ffe56e" },
+  analyzing: { label: "Listening", color: "#ffe56e" },
+  adapting: { label: "Re-teaching", color: "#ffe56e" },
+  critiquing: { label: "Checking", color: "#ffe56e" },
+  synthesizing: { label: "Voicing", color: "#ffe56e" },
+  done: { label: "Ready", color: "#bfc26a" },
+  failed: { label: "Failed", color: "#cb4e39" },
 };
 
 const SETTLED: JobStatus[] = ["done", "failed"];
@@ -64,8 +60,8 @@ function ago(iso: string, now: number): string {
 }
 
 /**
- * Your videos as a grid of cards: a frame of the footage (or an audio mark),
- * the topic once Gemini has named it, the length and the status.
+ * Your videos as rows: a frame of the footage (or an audio mark), the topic
+ * once Gemini has named it, the status and the length.
  *
  * The list arrives from the server component; while any card is still being
  * processed this re-runs that component every few seconds, so a card turns
@@ -107,62 +103,45 @@ export function JobList({ jobs }: { jobs: JobSummary[] }) {
 
   return (
     <>
-      <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-[minmax(0,1fr)_48px] gap-6 border-b border-cream/14 pb-3 text-[13px] text-cream/50 sm:grid-cols-[minmax(0,1fr)_140px_120px_48px]">
+        <span>Name</span>
+        <span className="hidden sm:block">Status</span>
+        <span className="hidden sm:block">Duration</span>
+        <span />
+      </div>
+      <ul>
         {jobs.map((job) => {
           const status = STATUS[job.status];
           const settled = SETTLED.includes(job.status);
           return (
             <li
               key={job.id}
-              className="group relative overflow-hidden rounded-xl border bg-card transition-colors hover:border-primary/40"
+              className="relative grid grid-cols-[minmax(0,1fr)_48px] items-center gap-6 border-b border-cream/10 py-[18px] transition-colors hover:bg-panel-2 sm:grid-cols-[minmax(0,1fr)_140px_120px_48px]"
             >
-              <Link href={`/localize/${job.id}`} className="grid">
-                <div className="relative flex aspect-video items-center justify-center bg-muted">
+              <Link
+                href={`/localize/${job.id}`}
+                className="flex min-w-0 items-center gap-5 after:absolute after:inset-0 nua-focus"
+              >
+                <span className="flex aspect-video w-[136px] shrink-0 items-center justify-center bg-panel-2">
                   {job.hasPoster ? (
                     // A plain <img>: the poster comes from our own API behind the
                     // session cookie, which next/image's optimizer would not send.
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={posterUrl(job)}
-                      alt=""
-                      loading="lazy"
-                      className="size-full object-cover"
-                    />
+                    <img src={posterUrl(job)} alt="" loading="lazy" className="size-full object-cover" />
                   ) : (
-                    <AudioLines className="size-10 text-muted-foreground" aria-hidden />
+                    <AudioLines className="size-7 text-cream/40" aria-hidden />
                   )}
-                  {job.durationSec === null ? null : (
-                    <span className="absolute right-2 bottom-2 rounded bg-black/70 px-1.5 py-0.5 text-xs font-medium tabular-nums text-white">
-                      {formatTime(job.durationSec)}
-                    </span>
-                  )}
-                  {/* A solid backing: the status colours are tints, unreadable over footage. */}
-                  <span className="absolute top-2 left-2 rounded-full bg-background/95 shadow-sm">
-                    <span
-                      className={cn(
-                        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
-                        status.className
-                      )}
-                    >
-                      {settled ? null : (
-                        <Loader2 className="size-3 animate-spin" aria-hidden />
-                      )}
-                      {status.label}
-                    </span>
-                  </span>
-                </div>
-                <div className="grid gap-1 p-3 pr-10">
-                  <span className="line-clamp-2 text-sm font-medium">
+                </span>
+                <span className="flex min-w-0 flex-col gap-1.5">
+                  <span className="line-clamp-2 text-[17px] leading-[1.35]">
                     {job.topic ??
-                      (job.status === "failed"
-                        ? "Untitled video"
-                        : "Working out the topic")}
+                      (job.status === "failed" ? "Untitled video" : "Working out the topic")}
                   </span>
-                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span className="flex items-center gap-2 text-[13px] text-cream/50">
                     {job.hasVideo ? (
-                      <Video className="size-3.5" aria-label="Video" />
+                      <Video className="size-3.5" strokeWidth={1.3} aria-label="Video" />
                     ) : (
-                      <AudioLines className="size-3.5" aria-label="Audio" />
+                      <AudioLines className="size-3.5" strokeWidth={1.3} aria-label="Audio" />
                     )}
                     <time
                       dateTime={job.createdAt}
@@ -171,19 +150,27 @@ export function JobList({ jobs }: { jobs: JobSummary[] }) {
                     >
                       {ago(job.createdAt, now)}
                     </time>
+                    <span className="sm:hidden">· {status.label}</span>
                   </span>
-                </div>
+                </span>
               </Link>
+              <span className="hidden items-center gap-2 text-[14px] sm:flex">
+                <span
+                  aria-hidden
+                  className={cn("size-[9px]", !settled && "animate-pulse")}
+                  style={{ background: status.color }}
+                />
+                {status.label}
+              </span>
+              <span className="hidden text-[14px] tabular-nums text-cream/75 sm:block">
+                {job.durationSec === null ? "—" : formatTime(job.durationSec)}
+              </span>
               <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="absolute right-1.5 bottom-2 size-8"
-                    aria-label={`More actions for ${job.topic ?? "this video"}`}
-                  >
-                    <MoreVertical />
-                  </Button>
+                <DropdownMenuTrigger
+                  aria-label={`More actions for ${job.topic ?? "this video"}`}
+                  className="relative z-1 flex size-9 items-center justify-center text-cream/70 hover:bg-cream/6 hover:text-cream nua-focus"
+                >
+                  <MoreVertical className="size-4" />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem

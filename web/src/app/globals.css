@@ -5,9 +5,28 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  /*
+   * Family names, not next/font variables: the designer's canvas scripts in
+   * public/nua/ set ctx.font by name ("Newsreader", "Tiro Devanagari Hindi"),
+   * and a canvas cannot resolve a CSS variable or next/font's hashed family.
+   * The faces are loaded by the <link> in app/layout.tsx.
+   */
+  --font-sans: "Inter Tight", system-ui, sans-serif, "Tiro Devanagari Hindi";
   --font-heading: var(--font-sans);
-  /* Devanagari as a per-glyph fallback, for Hindi quoted inside English text. */
-  --font-sans: var(--font-sans), var(--font-devanagari);
+  --font-serif: "Newsreader", Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-hindi: "Tiro Devanagari Hindi", "Noto Sans Devanagari", serif;
+
+  --color-ink: #0d0d03;
+  --color-cream: #ffe7ce;
+  --color-panel: #101106;
+  --color-panel-2: #141507;
+  --color-stone: #a39d94;
+  --color-lime: #d8dc6a;
+  --color-gloss: #ffe56e;
+  --color-flag: #cb4e39;
+  --color-blush: #fab0a1;
+  --color-olive: #bfc26a;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -49,73 +68,52 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  /* Indigo ink: a teacher's pen, and the one brand colour. */
-  --primary: oklch(0.4 0.15 272);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.6 0.12 272);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-}
+  /*
+   * Nua, the designer's palette (the bundle in docs/design is the reference).
+   * One theme: ink and cream. The shadcn tokens below are mapped onto it so
+   * the primitives that remain (menus, dialogs, toasts, forms) speak it too.
+   */
+  --background: #0d0d03;
+  --foreground: #ffe7ce;
+  --card: #101106;
+  --card-foreground: #ffe7ce;
+  --popover: #101106;
+  --popover-foreground: #ffe7ce;
+  --primary: #ffe7ce;
+  --primary-foreground: #0d0d03;
+  --secondary: #141507;
+  --secondary-foreground: #ffe7ce;
+  --muted: #141507;
+  --muted-foreground: #a39d94;
+  --accent: #141507;
+  --accent-foreground: #ffe7ce;
+  --destructive: #f07f6a;
+  --border: rgb(255 231 206 / 14%);
+  --input: rgb(255 231 206 / 30%);
+  --ring: #ffe7ce;
+  --chart-1: #ffe56e;
+  --chart-2: #bfc26a;
+  --chart-3: #cb4e39;
+  --chart-4: #fab0a1;
+  --chart-5: #868a59;
+  --radius: 0rem;
+  --sidebar: #101106;
+  --sidebar-foreground: #ffe7ce;
+  --sidebar-primary: #ffe7ce;
+  --sidebar-primary-foreground: #0d0d03;
+  --sidebar-accent: #141507;
+  --sidebar-accent-foreground: #ffe7ce;
+  --sidebar-border: rgb(255 231 206 / 14%);
+  --sidebar-ring: #ffe7ce;
 
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.78 0.1 275);
-  --primary-foreground: oklch(0.2 0.06 272);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.65 0.1 275);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  /* The page's two rails sit this far in from each edge, on every page. */
+  --rail: 3vw;
+  /* The cream nav bar's height, and the space a page leaves above its content. */
+  --nav-h: max(52px, 4.2vw);
+  --nav-space: calc(2.15vw + var(--nav-h));
+  /* The content gutter inside the rails. */
+  --gutter: max(24px, 5.5vw);
+  color-scheme: dark;
 }
 
 @layer base {
@@ -137,6 +135,173 @@
     }
   }
   [lang="hi"] {
-    font-family: var(--font-devanagari), var(--font-sans), sans-serif;
+    font-family: var(--font-hindi);
   }
+  body {
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/*
+ * The brand's typographic voice, restated once instead of on every page: a
+ * light Newsreader display line with one semibold italic word in it.
+ */
+@layer components {
+  .nua-display {
+    font-family: var(--font-serif);
+    font-weight: 300;
+    letter-spacing: -0.04em;
+    line-height: 1.04;
+  }
+  .nua-display em {
+    font-weight: 600;
+    font-style: italic;
+    letter-spacing: -0.03em;
+  }
+  .nua-lead {
+    font-size: max(15px, 1.2vw);
+    line-height: 1.45;
+    letter-spacing: -0.01em;
+    text-wrap: pretty;
+  }
+  .nua-label {
+    font-size: 12px;
+    color: rgb(255 231 206 / 50%);
+  }
+  .nua-caps {
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  /* The square-cornered buttons: cream on ink, and its outline twin. */
+  .nua-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 44px;
+    padding: 0 16px;
+    border: 1px solid var(--color-cream);
+    background: var(--color-cream);
+    color: var(--color-ink);
+    font-size: 15px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background 0.2s,
+      color 0.2s,
+      opacity 0.2s;
+  }
+  .nua-btn:hover {
+    opacity: 0.88;
+  }
+  .nua-btn:disabled,
+  .nua-btn[aria-disabled="true"] {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .nua-btn-outline {
+    background: transparent;
+    color: var(--color-cream);
+  }
+  .nua-btn-outline:hover,
+  .nua-btn-outline[aria-pressed="true"] {
+    background: var(--color-cream);
+    color: var(--color-ink);
+    opacity: 1;
+  }
+  .nua-btn:focus-visible,
+  .nua-focus:focus-visible {
+    outline: 2px solid var(--color-lime);
+    outline-offset: 2px;
+  }
+}
+
+@keyframes nua-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+html {
+  scroll-padding-top: 16px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+/* A page under the floating nav: the space it covers, then the gutter. */
+.nua-page {
+  position: relative;
+  padding-top: calc(var(--nav-space) + 40px);
+}
+
+/*
+ * The auth pages' cards and fields, in the design's form: no card chrome, a
+ * Newsreader title, underlined inputs, a tall cream button.
+ */
+.nua-auth [data-slot="card"] {
+  background: transparent;
+  box-shadow: none;
+  border: 0;
+  padding: 0;
+  gap: max(28px, 2.6vw);
+  --tw-ring-shadow: 0 0 #0000;
+}
+.nua-auth [data-slot="card-header"],
+.nua-auth [data-slot="card-content"],
+.nua-auth [data-slot="card-footer"] {
+  padding-inline: 0;
+}
+.nua-auth [data-slot="card-title"] {
+  font-family: var(--font-serif);
+  font-weight: 300;
+  font-size: max(40px, 3.6vw);
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+}
+.nua-auth [data-slot="card-title"] em {
+  font-weight: 600;
+  font-style: italic;
+  letter-spacing: -0.03em;
+}
+.nua-auth [data-slot="card-description"] {
+  font-size: max(15px, 1.2vw);
+  line-height: 1.45;
+  color: rgb(255 231 206 / 62%);
+}
+.nua-auth [data-slot="input"] {
+  height: 48px;
+  padding-inline: 0;
+  border: 0;
+  border-bottom: 1px solid rgb(255 231 206 / 30%);
+  background: transparent;
+  font-size: 17px;
+  box-shadow: none;
+}
+.nua-auth [data-slot="input"]:focus-visible {
+  border-color: var(--color-cream);
+  box-shadow: none;
+}
+.nua-auth [data-slot="input"][aria-invalid="true"] {
+  border-color: var(--destructive);
+}
+.nua-auth [data-slot="field-label"] {
+  font-size: 14px;
+  font-weight: 500;
+}
+.nua-auth [data-slot="button"] {
+  height: 48px;
+  font-size: 16px;
+  font-weight: 400;
+}
+.nua-auth a {
+  color: var(--color-cream);
 }

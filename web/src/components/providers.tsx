@@ -46,16 +46,10 @@ export function Providers({
 }) {
   return (
     <SiteConfigContext.Provider value={siteConfig}>
-      <ThemeProvider
-        attribute="class"
-        defaultTheme="system"
-        enableSystem
-        // Without this every theme change animates every transition on the
-        // page at once, which reads as a flash rather than a switch.
-        disableTransitionOnChange
-      >
+      {/* Nua has one theme; forcing it keeps the toasts on the same palette. */}
+      <ThemeProvider attribute="class" forcedTheme="dark" disableTransitionOnChange>
         {children}
-        <Toaster richColors position="top-center" />
+        <Toaster position="top-center" />
       </ThemeProvider>
     </SiteConfigContext.Provider>
   );

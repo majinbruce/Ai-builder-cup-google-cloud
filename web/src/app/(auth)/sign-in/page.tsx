@@ -16,7 +16,9 @@ export default function SignInPage() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Login to your account</CardTitle>
+        <CardTitle>
+          Login to your <em>account</em>
+        </CardTitle>
         <CardDescription>
           Enter your email below to login to your account.
         </CardDescription>

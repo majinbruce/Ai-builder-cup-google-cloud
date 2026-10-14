@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
-import { JobView } from "@/components/localize/job-view";
+import { WatchView } from "@/components/watch/watch-view";
 import { ApiError } from "@/lib/api/envelope";
 import { jobResponse } from "@/lib/api/localize";
 import { apiFetchServer } from "@/lib/api/server";
@@ -30,27 +29,23 @@ export default async function DemoPage() {
 
   if (job === null) {
     return (
-      <div className="mx-auto grid w-full max-w-xl justify-items-center gap-3 px-4 py-24 text-center">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          The demo lecture is not set up
+      <div className="nua-page mx-auto grid max-w-xl justify-items-center gap-4 px-4 pb-24 text-center">
+        <h1 className="nua-display text-[44px]">
+          The demo lecture is not <em>set up</em>
         </h1>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[15px] text-stone">
           Run a job, then promote it with{" "}
-          <code className="rounded bg-muted px-1">
+          <code className="bg-panel-2 px-1 font-mono">
             npm run localize:promote-demo -- &lt;jobId&gt;
           </code>
           . Meanwhile you can localize a clip of your own.
         </p>
-        <Button asChild>
-          <Link href="/localize">Localize a clip</Link>
-        </Button>
+        <Link href="/localize" className="nua-btn">
+          Localize a clip
+        </Link>
       </div>
     );
   }
 
-  return (
-    <div className="mx-auto w-full max-w-6xl px-4 py-10">
-      <JobView initialJob={job} demo />
-    </div>
-  );
+  return <WatchView initialJob={job} demo />;
 }

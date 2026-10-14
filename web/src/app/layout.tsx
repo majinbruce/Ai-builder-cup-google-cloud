@@ -1,26 +1,23 @@
 import type { Metadata } from "next";
-import { Geist, Noto_Sans_Devanagari } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
+import { ClickSound } from "@/components/nua/click-sound";
+import { Rails } from "@/components/nua/rails";
 import { SiteFooter } from "@/components/layout/site-footer";
 import { SiteHeader } from "@/components/layout/site-header";
 import { env } from "@/lib/env";
 import { getSiteConfig } from "@/lib/site-config.server";
-import { cn } from "@/lib/utils";
-
-const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 
 /**
- * The Hindi side of every localized job. Self-hosted by next/font at build
- * time rather than left to the viewer's system fonts: a machine with no
- * Devanagari face (a stock Linux box, a headless browser) renders the entire
- * product as tofu boxes, which is how the Phase 4 browser check found it.
- * Applied to `[lang="hi"]` in globals.css, so only Hindi text pays for it.
+ * The brand's four faces, by name. A stylesheet rather than next/font because
+ * the designer's canvas animations (public/nua/*.js) draw text with
+ * `ctx.font = '… "Newsreader"'`: a canvas resolves real family names only, and
+ * next/font renames every family it hosts. Tiro Devanagari Hindi is the Hindi
+ * side of every job; without a Devanagari face a stock Linux box renders the
+ * product as tofu boxes.
  */
-const devanagari = Noto_Sans_Devanagari({
-  subsets: ["devanagari"],
-  variable: "--font-devanagari",
-});
+const FONTS =
+  "https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;1,6..72,400;1,6..72,600&family=Inter+Tight:wght@400;500&family=IBM+Plex+Mono:wght@400;500&family=Tiro+Devanagari+Hindi&display=swap";
 
 /**
  * `generateMetadata` rather than a static `metadata` export, because the title
@@ -32,7 +29,7 @@ export function generateMetadata(): Metadata {
   return {
     metadataBase: new URL(env.APP_URL),
     title: {
-      default: env.APP_NAME,
+      default: `${env.APP_NAME}: where meaning finds a new voice`,
       template: `%s · ${env.APP_NAME}`,
     },
     description:
@@ -44,19 +41,25 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   const siteConfig = await getSiteConfig();
 
   return (
-    // `suppressHydrationWarning` is required by next-themes and only by it: the
-    // inline script it injects sets `class="dark"` on <html> before React
-    // hydrates, so the server's markup and the client's genuinely differ by one
-    // attribute. Without this, that legitimate difference is logged as an error
-    // on every page load. It suppresses the warning for THIS element only.
-    <html lang="en" suppressHydrationWarning className={cn("font-sans", geist.variable, devanagari.variable)}>
-      <body className="min-h-dvh bg-background text-foreground antialiased">
+    // One theme, so `dark` is fixed rather than toggled: the shadcn primitives'
+    // `dark:` variants are the ones written for an ink background.
+    // `suppressHydrationWarning` is for next-themes' inline script, which sets
+    // the same class before React hydrates.
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
+        <link rel="stylesheet" href={FONTS} />
+      </head>
+      <body className="min-h-dvh bg-ink font-sans text-cream">
         <Providers siteConfig={siteConfig}>
-          <div className="flex min-h-dvh flex-col">
+          <div className="relative flex min-h-dvh flex-col overflow-x-clip">
+            <Rails className="z-3" />
             <SiteHeader />
             <main className="flex-1">{children}</main>
             <SiteFooter />
           </div>
+          <ClickSound />
         </Providers>
       </body>
     </html>

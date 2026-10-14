@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, Loader2 } from "lucide-react";
 import type { JobStatus } from "@/lib/api/schemas";
 import { cn } from "@/lib/utils";
 import { PIPELINE_STEPS, stepIndex } from "@/components/localize/format";
@@ -13,9 +12,10 @@ const formatElapsed = (sec: number) =>
   `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
 
 /**
- * The five stages as a checklist. A failed job shows how far it got: the step
- * it failed in is the first one that is neither done nor running, and the
- * artifacts from the steps before it are still rendered below by the job view.
+ * The five stages as the design's numbered tab strip. A failed job shows how
+ * far it got: the step it failed in is the first one that is neither done nor
+ * running, and the artifacts from the steps before it are still rendered below
+ * by the watch page.
  *
  * A running job also shows how long it has been going against how long one
  * usually takes, because four minutes with no clock feels like a hang.
@@ -46,9 +46,9 @@ export function ProgressSteps({
   }, [active, startedAt]);
 
   return (
-    <section className="grid gap-3" aria-label="Pipeline progress">
+    <section className="grid gap-5" aria-label="Pipeline progress">
       {active ? (
-        <p className="text-sm text-muted-foreground" role="status">
+        <p className="text-[15px] text-cream/62" role="status">
           {elapsed === null
             ? "Working."
             : `Running for ${formatElapsed(elapsed)}; a one-minute clip usually takes about ${Math.round(TYPICAL_SEC / 60)} minutes.`}{" "}
@@ -56,7 +56,7 @@ export function ProgressSteps({
           leave this page.
         </p>
       ) : null}
-      <ol className="grid gap-3 sm:grid-cols-5">
+      <ol className="grid gap-6 sm:grid-cols-5">
         {PIPELINE_STEPS.slice(1).map((step, offset) => {
           const index = offset + 1;
           const done = status === "done" || index < current;
@@ -68,32 +68,36 @@ export function ProgressSteps({
               key={step.status}
               aria-current={running ? "step" : undefined}
               className={cn(
-                "rounded-lg border p-3 text-sm",
-                done && "border-emerald-500/40 bg-emerald-500/5",
-                running && "border-primary bg-primary/5",
-                failed && "border-destructive bg-destructive/5"
+                "grid content-start gap-2 border-b pb-3",
+                done && "border-olive",
+                running && "border-cream",
+                failed && "border-flag",
+                !done && !running && !failed && "border-cream/14"
               )}
             >
-              <div className="flex items-center gap-2 font-medium">
-                {done ? (
-                  <Check className="size-4 text-emerald-600" aria-hidden />
-                ) : running ? (
-                  <Loader2 className="size-4 animate-spin text-primary" aria-hidden />
-                ) : (
-                  <span
-                    className={cn(
-                      "size-4 rounded-full border",
-                      failed && "border-destructive bg-destructive"
-                    )}
-                    aria-hidden
-                  />
+              <span
+                className={cn(
+                  "nua-caps flex items-center gap-2 text-[14px]",
+                  running || done ? "text-cream" : "text-cream/40",
+                  failed && "text-flag"
                 )}
-                {step.label}
+              >
+                <span
+                  aria-hidden
+                  className={cn(
+                    "size-[9px]",
+                    done && "bg-olive",
+                    running && "animate-pulse bg-cream",
+                    failed && "bg-flag",
+                    !done && !running && !failed && "border border-cream/30"
+                  )}
+                />
+                0{offset + 1} {step.label}
                 <span className="sr-only">
                   {done ? "done" : running ? "running" : failed ? "failed" : "waiting"}
                 </span>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">{step.detail}</p>
+              </span>
+              <p className="text-[13px] leading-snug text-stone">{step.detail}</p>
             </li>
           );
         })}

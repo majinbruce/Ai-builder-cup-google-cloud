@@ -72,34 +72,19 @@ export const SIGNAL_LABEL: Record<PedagogicalSignal, string> = {
 };
 
 /**
- * One colour per instructional move, so the segment list reads as the shape of
- * the lesson at a glance. Tailwind classes, light and dark; the designer owns
- * the final palette.
+ * One colour per instructional move, so a segment strip reads as the shape of
+ * the lesson at a glance. The designer's five (Nua's palette) plus three for
+ * the moves the demo lecture happened not to use.
  */
-export const SIGNAL_TONE: Record<PedagogicalSignal, string> = {
-  definition: "bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200",
-  key_term: "bg-violet-100 text-violet-900 dark:bg-violet-950 dark:text-violet-200",
-  example: "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
-  warning: "bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200",
-  emphasis_shift: "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
-  transition: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
-  recap: "bg-teal-100 text-teal-900 dark:bg-teal-950 dark:text-teal-200",
-  none: "bg-muted text-muted-foreground",
-};
-
-/**
- * The same colours at full strength, for the lesson map's bands, where a
- * segment is a few pixels of colour with no text on it to carry contrast.
- */
-export const SIGNAL_BAND: Record<PedagogicalSignal, string> = {
-  definition: "bg-sky-500",
-  key_term: "bg-violet-500",
-  example: "bg-emerald-500",
-  warning: "bg-red-500",
-  emphasis_shift: "bg-amber-400",
-  transition: "bg-slate-400 dark:bg-slate-500",
-  recap: "bg-teal-500",
-  none: "bg-muted-foreground/25",
+export const SIGNAL_COLOR: Record<PedagogicalSignal, string> = {
+  definition: "#ffe56e",
+  key_term: "#f2ac48",
+  example: "#bfc26a",
+  warning: "#f07f6a",
+  emphasis_shift: "#cb4e39",
+  transition: "#868a59",
+  recap: "#fab0a1",
+  none: "rgb(255 231 206 / 25%)",
 };
 
 /** One line per signal: what the teacher was doing, in a learner's terms. */
@@ -144,7 +129,7 @@ export const PIPELINE_STEPS: { status: JobStatus; label: string; detail: string 
   {
     status: "synthesizing",
     label: "Synthesize",
-    detail: "Chirp 3 HD, with the pacing and pauses stage 1 heard",
+    detail: "Gemini TTS, directed with the register, pace and stress stage 1 heard",
   },
   { status: "done", label: "Done", detail: "" },
 ];

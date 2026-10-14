@@ -14,7 +14,9 @@ export default function SignUpPage() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Create your account</CardTitle>
+        <CardTitle>
+          Create your <em>account</em>
+        </CardTitle>
         <CardDescription>
           Enter your details below to create your account.
         </CardDescription>

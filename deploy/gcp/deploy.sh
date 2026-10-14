@@ -51,7 +51,7 @@ RUNTIME_SA="localize-api"
 API_SVC="localize-api"
 WEB_SVC="localize-web"
 OPS_JOB="localize-ops"
-APP_NAME="Intent-Preserving Localization"
+APP_NAME="Nua"
 DEMO_EMAIL="${DEMO_EMAIL:-demo@example.com}"
 
 # Hops between the caller and Fastify: web's Next proxy, then the API's Google

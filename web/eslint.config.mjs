@@ -44,7 +44,8 @@ const eslintConfig = defineConfig([
       "@typescript-eslint/no-explicit-any": "off",
     },
   },
-  globalIgnores([".next/**", "out/**", "build/**", "next-env.d.ts"]),
+  // public/nua/ is the designer's canvas code, vendored as delivered.
+  globalIgnores([".next/**", "out/**", "build/**", "next-env.d.ts", "public/nua/**"]),
 ]);
 
 export default eslintConfig;

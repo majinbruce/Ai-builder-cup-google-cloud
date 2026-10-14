@@ -13,7 +13,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
 import { authClient } from "@/lib/auth-client";
 import type { User } from "@/lib/api/schemas";
 
@@ -75,13 +74,20 @@ export function UserMenu({ user }: { user: User }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="rounded-full">
-          <Avatar className="size-8">
-            {imageSrc === undefined ? null : <AvatarImage src={imageSrc} alt="" />}
-            <AvatarFallback>{initials || "?"}</AvatarFallback>
+        <button
+          type="button"
+          className="flex size-[max(42px,3.3vw)] items-center justify-center bg-ink transition-opacity hover:opacity-85 nua-focus"
+        >
+          <Avatar className="size-7 rounded-none after:rounded-none">
+            {imageSrc === undefined ? null : (
+              <AvatarImage src={imageSrc} alt="" className="rounded-none" />
+            )}
+            <AvatarFallback className="rounded-none bg-cream/14 text-xs text-cream">
+              {initials || "?"}
+            </AvatarFallback>
           </Avatar>
           <span className="sr-only">Account menu</span>
-        </Button>
+        </button>
       </DropdownMenuTrigger>
 
       <DropdownMenuContent align="end" className="w-56">

@@ -43,9 +43,9 @@ export default async function AdminUsersPage({
   });
 
   return (
-    <div className="grid gap-6">
+    <div className="nua-page mx-auto grid w-full max-w-5xl gap-6 px-(--gutter)">
       <div className="grid gap-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Users</h1>
+        <h1 className="nua-display text-[44px]">Users</h1>
         <p className="text-sm text-muted-foreground">
           {meta.total} total · page {meta.page} of {Math.max(meta.totalPages, 1)}
         </p>

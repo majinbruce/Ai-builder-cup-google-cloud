@@ -6,7 +6,6 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { FileAudio, Upload } from "lucide-react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
 import {
   Field,
   FieldDescription,
@@ -55,6 +54,13 @@ function probeDuration(file: File): Promise<number | null> {
   });
 }
 
+/** One file as the FileList a file input would hold. */
+function asFileList(file: File): FileList {
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  return transfer.files;
+}
+
 /**
  * Upload a clip, then go straight to its job page, which polls.
  *
@@ -63,14 +69,14 @@ function probeDuration(file: File): Promise<number | null> {
  * the API checks all three again plus whether the file is audio at all, and
  * its `details[]` land under the same field through applyFieldErrors.
  */
-export function UploadForm() {
+export function UploadForm({ initialFile = null }: { initialFile?: File | null }) {
   const router = useRouter();
   const [dragging, setDragging] = useState(false);
   // 0-1 while the bytes go up; null before and after. A 100 MB lecture takes
   // long enough that a button reading "Uploading" alone looks like a hang.
   const [progress, setProgress] = useState<number | null>(null);
   const [picked, setPicked] = useState<{ file: File; durationSec: number | null } | null>(
-    null
+    initialFile === null ? null : { file: initialFile, durationSec: null }
   );
 
   const {
@@ -80,7 +86,10 @@ export function UploadForm() {
     clearErrors,
     setValue,
     formState: { errors, isSubmitting },
-  } = useForm<UploadValues>({ resolver: zodResolver(uploadSchema) });
+  } = useForm<UploadValues>({
+    resolver: zodResolver(uploadSchema),
+    ...(initialFile === null ? {} : { defaultValues: { file: asFileList(initialFile) } }),
+  });
 
   const inspect = async (files: FileList | null) => {
     const file = files?.[0];
@@ -100,6 +109,17 @@ export function UploadForm() {
     onChange: (event: React.ChangeEvent<HTMLInputElement>) =>
       void inspect(event.target.files),
   });
+
+  // A file dropped on the library's dropzone arrives already chosen; only its
+  // length is still to be read.
+  useEffect(() => {
+    if (initialFile === null) return;
+    void probeDuration(initialFile).then((durationSec) =>
+      setPicked((current) =>
+        current?.file === initialFile ? { file: initialFile, durationSec } : current
+      )
+    );
+  }, [initialFile]);
 
   const onDrop = (event: React.DragEvent<HTMLLabelElement>) => {
     event.preventDefault();
@@ -160,19 +180,22 @@ export function UploadForm() {
             onDragLeave={() => setDragging(false)}
             onDrop={onDrop}
             className={cn(
-              "flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors hover:border-primary/50 hover:bg-primary/5 has-[:focus-visible]:border-primary has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/50",
-              dragging && "border-primary bg-primary/5",
-              errors.file !== undefined && "border-destructive/60"
+              "flex min-h-[min(220px,26vh)] cursor-pointer flex-col items-center justify-center gap-3 border border-dashed border-cream/35 p-6 text-center transition-colors hover:border-cream has-[:focus-visible]:border-cream has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-lime",
+              (dragging || picked !== null) && "border-cream",
+              dragging && "bg-cream/6",
+              errors.file !== undefined && "border-destructive"
             )}
           >
             {picked === null ? (
               <>
-                <Upload className="size-8 text-primary" aria-hidden />
+                <span className="flex size-[52px] items-center justify-center border border-cream">
+                  <Upload className="size-5" strokeWidth={1.3} aria-hidden />
+                </span>
                 <span className="grid gap-1">
-                  <span className="font-medium">
+                  <span className="text-[17px] font-medium">
                     Drop an English lecture here, or choose a file
                   </span>
-                  <span className="text-sm text-muted-foreground">
+                  <span className="text-[14px] text-cream/55">
                     Audio or mp4 video, up to {MAX_UPLOAD_BYTES / 1024 / 1024} MB and{" "}
                     {MAX_CLIP_SECONDS / 60} minutes
                   </span>
@@ -180,10 +203,12 @@ export function UploadForm() {
               </>
             ) : (
               <>
-                <FileAudio className="size-8 text-primary" aria-hidden />
+                <span className="flex size-[52px] items-center justify-center border border-cream">
+                  <FileAudio className="size-5" strokeWidth={1.3} aria-hidden />
+                </span>
                 <span className="grid gap-1">
                   <span className="font-medium break-all">{picked.file.name}</span>
-                  <span className="text-sm tabular-nums text-muted-foreground">
+                  <span className="text-[14px] tabular-nums text-cream/55">
                     {formatSize(picked.file.size)}
                     {picked.durationSec === null
                       ? ""
@@ -202,29 +227,33 @@ export function UploadForm() {
               {...field}
             />
           </label>
-          <FieldDescription>
+          <FieldDescription className="text-[15px] leading-normal text-stone">
             A one-minute clip takes about four minutes: Gemini listens, plans, re-teaches
             each segment, critiques itself and then speaks. Lectures with definitions,
             examples and a clear teacher voice show the most.
           </FieldDescription>
           <FieldError errors={[errors.file]} />
         </Field>
-        <Field orientation="horizontal">
-          <Button type="submit" size="lg" disabled={isSubmitting || tooLong}>
-            {!isSubmitting
-              ? "Localize to Hindi"
-              : progress !== null && progress < 1
-                ? `Uploading ${Math.round(progress * 100)}%`
-                : "Starting the job"}
-          </Button>
+        <Field orientation="horizontal" className="justify-end">
           {isSubmitting && progress !== null ? (
             <progress
               value={progress}
               max={1}
               aria-label="Upload progress"
-              className="h-2 w-full max-w-48 accent-primary"
+              className="h-1 w-full max-w-48 accent-cream"
             />
           ) : null}
+          <button
+            type="submit"
+            className="nua-btn h-[46px] px-5 text-[16px]"
+            disabled={isSubmitting || tooLong || picked === null}
+          >
+            {!isSubmitting
+              ? "Localize to Hindi"
+              : progress !== null && progress < 1
+                ? `Uploading ${Math.round(progress * 100)}%`
+                : "Starting the job"}
+          </button>
         </Field>
       </FieldGroup>
     </form>

@@ -40,7 +40,7 @@ export function Highlight({ text, marks }: { text: string; marks: Mark[] }) {
         key={index}
         title={mark.title}
         className={cn(
-          "rounded bg-amber-200/70 px-0.5 text-inherit underline decoration-dotted underline-offset-4 dark:bg-amber-500/30",
+          "bg-transparent text-gloss underline decoration-gloss/50 decoration-dotted underline-offset-4",
           mark.className
         )}
       >
