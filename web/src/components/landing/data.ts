@@ -24,15 +24,64 @@ export interface SpecimenPart {
 }
 
 export interface MeasuredStats {
-  totalSegments: number;
-  /** Segments where the model claimed at least one stressed word. */
-  claimedSegments: number;
-  /** Segments where at least one such claim was backed by a measurement. */
-  measuredSegments: number;
-  claimedWords: number;
-  measuredWords: number;
+  /** What the counts below are out of: segments for a real job. */
+  total: number;
+  unit: string;
+  /** Where the model claimed a stressed word. */
+  claimed: number;
+  /** Where a loudness or pause measurement backs that claim up. */
+  measured: number;
   specimen: SpecimenPart[];
 }
+
+/**
+ * The designer's sample of the demo lecture, shown until a demo job is
+ * promoted (`npm run localize:promote-demo`); a promoted job's own analysis
+ * and corroboration replace both.
+ */
+const SAMPLE_BANDS: [PedagogicalSignal, number][] = [
+  ["transition", 24.1],
+  ["example", 21.1],
+  ["emphasis_shift", 10.9],
+  ["recap", 12],
+  ["definition", 10.2],
+  ["example", 20.1],
+  ["emphasis_shift", 10.9],
+  ["transition", 5.5],
+];
+
+export const SAMPLE_SHAPE: LessonShape = {
+  topic: "The Brachistochrone problem and the path of fastest descent under gravity",
+  durationSec: 63,
+  bands: SAMPLE_BANDS.reduce<LessonBand[]>((bands, [signal, weight]) => {
+    const total = SAMPLE_BANDS.reduce((sum, [, w]) => sum + w, 0);
+    const startSec = bands.reduce((sum, band) => sum + band.spanSec, 0);
+    return [...bands, { signal, startSec, spanSec: (weight / total) * 63 }];
+  }, []),
+};
+
+/** [text, was stress claimed, was it measured] */
+const SAMPLE_WORDS: [string, boolean, boolean][] = [
+  ["Gravity", true, true], [" is the ", false, false], ["force", true, true],
+  [" that ", false, false], ["attracts two bodies toward", true, false],
+  [" each other. The ", false, false], ["heavier", true, true],
+  [" the bodies, the ", false, false], ["stronger", true, false], [" the ", false, false],
+  ["pull", true, true], [". And ", false, false], ["distance", true, true],
+  [" matters ", false, false], ["even more", true, false], [": ", false, false],
+  ["double", true, true], [" the distance, and the pull falls to a ", false, false],
+  ["quarter", true, true], [". That is why the ", false, false], ["Moon", true, false],
+  [" stays in ", false, false], ["orbit", true, false], [" instead of ", false, false],
+  ["falling", true, false], [" to Earth, and why the ", false, false],
+  ["tides", true, true], [" rise twice a day.", false, false],
+];
+
+export const SAMPLE_STATS: MeasuredStats = {
+  total: 19,
+  unit: "key moments",
+  claimed: 16,
+  measured: 10,
+  specimen: SAMPLE_WORDS.map(([text, claimed, measured]) => ({ text, claimed, measured })),
+};
 
 export function lessonShape(job: Job): LessonShape | null {
   const segments = job.analysis?.segments ?? [];
@@ -101,11 +150,10 @@ export function measuredStats(job: Job): MeasuredStats | null {
     });
 
   return {
-    totalSegments: segments.length,
-    claimedSegments: claimed.length,
-    measuredSegments: measured.length,
-    claimedWords: checks.length,
-    measuredWords: checks.filter((check) => check.verdict === "supported").length,
+    total: segments.length,
+    unit: "segments",
+    claimed: claimed.length,
+    measured: measured.length,
     specimen,
   };
 }

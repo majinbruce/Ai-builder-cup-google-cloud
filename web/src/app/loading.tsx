@@ -1,16 +1,10 @@
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoader } from "@/components/nua/page-loader";
 
 /**
- * The fallback shown while a route segment's server components are still
- * rendering. Its presence is what makes navigation feel instant: Next.js sends
- * this immediately and streams the real page in behind it.
+ * Shown the moment a route starts rendering on the server and replaced as the
+ * real page streams in. Every page here is dynamic (the header reads the
+ * session), so without it a navigation has nothing to show for a second.
  */
 export default function Loading() {
-  return (
-    <div className="mx-auto grid w-full max-w-5xl gap-4 px-4 py-10">
-      <Skeleton className="h-8 w-48" />
-      <Skeleton className="h-4 w-72" />
-      <Skeleton className="h-48 w-full" />
-    </div>
-  );
+  return <PageLoader />;
 }

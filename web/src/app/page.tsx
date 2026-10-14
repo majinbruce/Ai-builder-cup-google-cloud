@@ -1,11 +1,17 @@
 import Script from "next/script";
+import { HashScroll } from "@/components/landing/hash-scroll";
 import { Hero } from "@/components/landing/hero";
 import { LessonSection } from "@/components/landing/lesson-section";
 import { MeasuredSection } from "@/components/landing/measured-section";
 import { NuaFooter } from "@/components/landing/nua-footer";
 import { ProcessSection } from "@/components/landing/process-section";
 import { SignalsSection } from "@/components/landing/signals-section";
-import { lessonShape, measuredStats } from "@/components/landing/data";
+import {
+  SAMPLE_SHAPE,
+  SAMPLE_STATS,
+  lessonShape,
+  measuredStats,
+} from "@/components/landing/data";
 import { Divider } from "@/components/nua/rails";
 import { jobResponse } from "@/lib/api/localize";
 import { apiFetchServer } from "@/lib/api/server";
@@ -26,15 +32,14 @@ async function loadDemo(): Promise<Job | null> {
 }
 
 /**
- * The designer's landing page. Two of its sections are the demo lecture's own
- * data — the shape of the lesson, and the model's stress claims against the
- * measurements — so they appear only when a demo job is promoted, rather than
- * as numbers the pipeline never produced.
+ * The designer's landing page. Two of its sections show the demo lecture — the
+ * shape of the lesson, and the model's stress claims against the measurements:
+ * the promoted demo job's own data, or the designer's sample until there is one.
  */
 export default async function LandingPage() {
   const demo = await loadDemo();
-  const shape = demo === null ? null : lessonShape(demo);
-  const stats = demo === null ? null : measuredStats(demo);
+  const shape = (demo === null ? null : lessonShape(demo)) ?? SAMPLE_SHAPE;
+  const stats = (demo === null ? null : measuredStats(demo)) ?? SAMPLE_STATS;
 
   return (
     <div className="relative">
@@ -43,13 +48,14 @@ export default async function LandingPage() {
       <Script src="/nua/lesson-glow.js" strategy="afterInteractive" />
       <Script src="/nua/seam.js" strategy="afterInteractive" />
 
+      <HashScroll />
       <Hero />
       <Divider />
       <ProcessSection />
       <Divider />
-      {shape === null ? null : <LessonSection shape={shape} />}
-      {shape === null || stats === null ? null : <MeasuredSection stats={stats} />}
-      <SignalsSection afterCream={shape !== null && stats !== null} />
+      <LessonSection shape={shape} />
+      <MeasuredSection stats={stats} />
+      <SignalsSection />
       <NuaFooter />
     </div>
   );

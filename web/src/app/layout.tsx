@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import "./globals.css";
 import { Providers } from "@/components/providers";
 import { ClickSound } from "@/components/nua/click-sound";
+import { NavProgress } from "@/components/nua/nav-progress";
 import { Rails } from "@/components/nua/rails";
 import { SiteFooter } from "@/components/layout/site-footer";
 import { SiteHeader } from "@/components/layout/site-header";
@@ -60,6 +62,10 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
             <SiteFooter />
           </div>
           <ClickSound />
+          {/* useSearchParams suspends; the boundary keeps pages static-capable. */}
+          <Suspense fallback={null}>
+            <NavProgress />
+          </Suspense>
         </Providers>
       </body>
     </html>

@@ -92,8 +92,8 @@ export function MeasuredSection({ stats }: { stats: MeasuredStats }) {
   }, []);
 
   const measured = mode === "measured";
-  const claimedPct = pct(stats.claimedSegments, stats.totalSegments);
-  const measuredPct = pct(stats.measuredSegments, stats.totalSegments);
+  const claimedPct = pct(stats.claimed, stats.total);
+  const measuredPct = pct(stats.measured, stats.total);
   const reveal = (seen: boolean) =>
     cn(
       "transition-[opacity,transform] duration-700 ease-out",
@@ -132,13 +132,13 @@ export function MeasuredSection({ stats }: { stats: MeasuredStats }) {
           <div className="mt-[max(32px,3.4vw)] flex flex-col gap-[max(12px,1.1vw)]">
             <Bar
               label="Model asserted"
-              value={`${stats.claimedSegments} / ${stats.totalSegments}`}
+              value={`${stats.claimed} / ${stats.total}`}
               width={firstSeen ? claimedPct : 0}
               color="#cb4e39"
             />
             <Bar
               label="Measured"
-              value={`${stats.measuredSegments} / ${stats.totalSegments}`}
+              value={`${stats.measured} / ${stats.total}`}
               width={secondSeen ? measuredPct : 0}
               color="#fab0a1"
             />
@@ -155,8 +155,7 @@ export function MeasuredSection({ stats }: { stats: MeasuredStats }) {
               “I detected emphasis here.”
             </p>
             <p className="mt-[max(8px,0.8vw)] text-[max(13px,1vw)] leading-[1.45] text-ink/55">
-              A stressed word claimed in {stats.claimedSegments} of {stats.totalSegments}{" "}
-              segments, {stats.claimedWords} words in all
+              Emphasis claimed on {stats.claimed} of {stats.total} {stats.unit}
             </p>
           </div>
           <div ref={secondRef} className={cn("pb-[max(48px,5vw)]", reveal(secondSeen))}>
@@ -165,11 +164,10 @@ export function MeasuredSection({ stats }: { stats: MeasuredStats }) {
               <Scramble word={`${measuredPct}%`} seed={23} durMs={900} delayMs={150} />
             </p>
             <p className="mt-[max(10px,1.1vw)] font-serif text-[max(20px,2vw)] leading-[1.2] tracking-[-0.02em] italic">
-              “Only these showed an actual measured rise in energy, or a pause before.”
+              “Only these signals showed an actual measured energy rise.”
             </p>
             <p className="mt-[max(8px,0.8vw)] text-[max(13px,1vw)] leading-[1.45] text-ink/55">
-              Backed by ffmpeg in {stats.measuredSegments} of {stats.totalSegments}{" "}
-              segments, {stats.measuredWords} of the {stats.claimedWords} words
+              Energy rise confirmed on {stats.measured} of {stats.total}
             </p>
           </div>
           <div
@@ -206,7 +204,7 @@ export function MeasuredSection({ stats }: { stats: MeasuredStats }) {
                     key={index}
                     className="transition-colors duration-400"
                     style={{
-                      color: !on ? "#0d0d03" : measured ? "#e0806e" : "#b8432f",
+                      color: !on ? "#0d0d03" : measured ? "#fab0a1" : "#b8432f",
                       fontWeight: on ? 500 : 400,
                     }}
                   >
