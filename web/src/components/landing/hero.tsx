@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { prefersReducedMotion, scramble } from "@/components/nua/scramble";
 
@@ -50,7 +50,104 @@ interface Box {
  * wherever the pointer passes over the flower. The headline's last word
  * follows the newest box, and settles back to "voice" when the pointer leaves.
  */
+/** Sections a link can land on directly; arriving at one skips the intro. */
+const SECTIONS = ["process", "lesson", "signals"];
+const EASE = "cubic-bezier(.16,1,.3,1)";
+const RISE = [
+  { opacity: 0, transform: "translateY(16px)" },
+  { opacity: 1, transform: "none" },
+];
+
+/**
+ * The designer's opening on the first visit of a page load: the intro drawing
+ * (public/nua/intro.js) over the whole screen, then the hero assembling itself
+ * after it — slowly behind the intro, briskly on every later visit. Returns the
+ * moment, on the animation clock, the headline is in place.
+ */
+function entrance(hero: HTMLElement, base: number, slow: boolean): number {
+  const m = slow ? 2.4 : 1;
+  const z = slow ? 1.35 : 1;
+  const run = (el: Element | null | undefined, kf: Keyframe[], d: number, dur = 1100) =>
+    el?.animate(kf, {
+      duration: dur * z,
+      delay: base + d * m,
+      easing: EASE,
+      fill: "backwards",
+    });
+  if (slow) {
+    hero.animate([{ opacity: 0 }, { opacity: 1 }], {
+      duration: 600,
+      delay: base,
+      easing: EASE,
+      fill: "backwards",
+    });
+  }
+  const h1 = hero.querySelector("h1");
+  run(
+    document.querySelector("header nav"),
+    [
+      { opacity: 0, transform: "translateY(-14px)" },
+      { opacity: 1, transform: "none" },
+    ],
+    0
+  );
+  run(
+    hero.querySelector("video")?.parentElement,
+    [
+      { opacity: 0, transform: "scale(1.05)" },
+      { opacity: 1, transform: "none" },
+    ],
+    100,
+    1900
+  );
+  run(
+    h1,
+    [
+      { opacity: 0, transform: "translateY(26px)", filter: "blur(12px)" },
+      { opacity: 1, transform: "none", filter: "blur(0)" },
+    ],
+    220,
+    1300
+  );
+  run(h1?.nextElementSibling, RISE, 460);
+  run(h1?.parentElement?.lastElementChild, RISE, 580);
+  return performance.now() + base + 220 * m + 350;
+}
+
+/** Each of the page's section headings drifts in the first time it scrolls into view. */
+function revealHeadings(root: HTMLElement): () => void {
+  const headings = [...root.querySelectorAll("h2")];
+  headings.forEach((el) => (el.style.opacity = "0"));
+  const io = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting || !(entry.target instanceof HTMLElement)) continue;
+        io.unobserve(entry.target);
+        entry.target.style.opacity = "";
+        entry.target.animate(
+          [
+            { opacity: 0, transform: "translateY(22px)", filter: "blur(8px)" },
+            { opacity: 1, transform: "none", filter: "blur(0)" },
+          ],
+          { duration: 1100, easing: EASE }
+        );
+      }
+    },
+    { rootMargin: "0px 0px -12% 0px" }
+  );
+  headings.forEach((el) => io.observe(el));
+  return () => {
+    io.disconnect();
+    headings.forEach((el) => (el.style.opacity = ""));
+  };
+}
+
 export function Hero() {
+  // An ink cover from the first paint until the intro takes over, so the hero
+  // does not flash before it. Only on a page load's first visit.
+  const [covered, setCovered] = useState(
+    () => typeof window === "undefined" || window.__nuaIntroDone !== true
+  );
   const heroRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -70,7 +167,41 @@ export function Hero() {
       if (video.paused && !document.hidden) void video.play().catch(() => undefined);
     }, 1000);
 
-    if (prefersReducedMotion()) return () => clearInterval(playGuard);
+    const firstVisit = window.__nuaIntroDone !== true;
+    window.__nuaIntroDone = true;
+    if (prefersReducedMotion()) {
+      setCovered(false);
+      return () => clearInterval(playGuard);
+    }
+
+    // The headline's word scrambles in once the entrance has placed it.
+    let head = { to: "voice", start: 0, dur: 420 };
+    let introWait: ReturnType<typeof setTimeout> | undefined;
+    const enter = (base: number, slow: boolean) => {
+      head = { to: "voice", start: entrance(hero, base, slow), dur: 1300 };
+    };
+    const skipIntro = !firstVisit || SECTIONS.includes(window.location.hash.slice(1));
+    if (skipIntro) {
+      setCovered(false);
+      enter(0, false);
+    } else {
+      const startedAt = performance.now();
+      const startIntro = () => {
+        if (window.NuaIntro !== undefined) {
+          window.NuaIntro.overlay("a", (total) => enter(total, true));
+          setCovered(false);
+        } else if (performance.now() - startedAt > 4000) {
+          // The script never arrived: no intro, but never a page stuck under ink.
+          setCovered(false);
+          enter(0, false);
+        } else {
+          introWait = setTimeout(startIntro, 40);
+        }
+      };
+      startIntro();
+    }
+    const unreveal =
+      hero.parentElement === null ? () => {} : revealHeadings(hero.parentElement);
 
     const mouse = { x: -1, y: -1, inside: false, overUi: false };
     const onMove = (event: PointerEvent) => {
@@ -136,7 +267,6 @@ export function Hero() {
     let lastSample = -1e9;
     let cursorHidden = false;
     let shown = "voice";
-    let head = { to: "voice", start: 0 };
     const trail = {
       lx: null as number | null,
       ly: 0,
@@ -228,14 +358,14 @@ export function Hero() {
           trail.lx = mouse.x;
           trail.ly = mouse.y;
           trail.lt = t;
-          if (head.to !== word) head = { to: word, start: t };
+          if (head.to !== word) head = { to: word, start: t, dur: 420 };
         }
         trail.off = t;
       } else if (head.to !== "voice" && t - trail.off > 900) {
-        head = { to: "voice", start: t };
+        head = { to: "voice", start: t, dur: 420 };
       }
 
-      const want = scramble(head.to, t - head.start, 420, 7);
+      const want = scramble(head.to, t - head.start, head.dur, 7);
       if (want !== shown && voiceRef.current !== null) {
         voiceRef.current.textContent = want;
         shown = want;
@@ -323,6 +453,8 @@ export function Hero() {
     return () => {
       cancelAnimationFrame(raf);
       clearInterval(playGuard);
+      clearTimeout(introWait);
+      unreveal();
       window.removeEventListener("pointermove", onMove);
       document.documentElement.removeEventListener("pointerleave", onLeave);
     };
@@ -334,7 +466,7 @@ export function Hero() {
   return (
     <div
       ref={heroRef}
-      className="relative h-[max(100vh,60.6vw)] min-h-[560px] w-full overflow-hidden bg-ink"
+      className="relative h-[calc(50vw+110px)] min-h-[670px] w-full overflow-hidden bg-ink"
     >
       <div className="absolute top-[440px] left-[-25%] aspect-[1.7843] w-[160%] md:top-[max(90px,9vw)] md:left-[32%] md:w-[80%]">
         <video
@@ -390,6 +522,10 @@ export function Hero() {
           </Link>
         </div>
       </div>
+
+      {covered && (
+        <div data-nua-cover aria-hidden className="fixed inset-0 z-[2147482999] bg-ink" />
+      )}
     </div>
   );
 }

@@ -34,9 +34,20 @@ interface NuaSeamLib {
   ): void;
 }
 
+interface NuaCursorLib {
+  site(kind: string): void;
+}
+
+interface NuaIntroLib {
+  overlay(variant: string, onStart: (totalMs: number) => void): void;
+}
+
 interface Window {
   NuaAnims?: NuaAnimsLib;
   NuaAnimFonts?: string[];
   NuaGlow?: NuaGlowLib;
   NuaSeam?: NuaSeamLib;
+  NuaCursor?: NuaCursorLib;
+  NuaIntro?: NuaIntroLib;
+  __nuaIntroDone?: boolean;
 }

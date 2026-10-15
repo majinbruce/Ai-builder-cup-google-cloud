@@ -305,3 +305,10 @@ html {
 .nua-auth a {
   color: var(--color-cream);
 }
+
+/* The hero's ink cover waits for the intro script; without scripts there is none. */
+@media (scripting: none) {
+  [data-nua-cover] {
+    display: none;
+  }
+}

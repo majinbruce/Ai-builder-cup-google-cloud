@@ -47,6 +47,7 @@ export default async function LandingPage() {
       <Script src="/nua/mini-anims.js" strategy="afterInteractive" />
       <Script src="/nua/lesson-glow.js" strategy="afterInteractive" />
       <Script src="/nua/seam.js" strategy="afterInteractive" />
+      <Script src="/nua/intro.js" strategy="afterInteractive" />
 
       <HashScroll />
       <Hero />

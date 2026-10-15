@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { prepareCanvas } from "@/components/nua/canvas";
 import { Scramble } from "@/components/nua/scramble";
 import { SIGNAL_COLOR, SIGNAL_LABEL, formatTime } from "@/components/localize/format";
@@ -133,9 +132,6 @@ export function LessonSection({ shape }: { shape: LessonShape }) {
               {shape.topic}, as Gemini heard it: each band is one stretch of the lecture,
               coloured by what the teacher was doing.
             </p>
-            <Link href="/demo" className="nua-btn nua-btn-outline">
-              Explore it →
-            </Link>
           </div>
         </div>
 
